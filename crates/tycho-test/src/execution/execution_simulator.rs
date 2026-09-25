@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use alloy::{
     eips::BlockNumberOrTag,
     hex,
-    primitives::{keccak256, Bytes, B256},
+    primitives::{keccak256, Bytes, B256, U256},
     rpc::{
         client::ClientBuilder,
-        types::{Block, BlockId},
+        types::{Block, BlockId, BlockOverrides},
     },
     sol_types::SolValue,
 };
@@ -199,13 +199,7 @@ impl ExecutionSimulator {
         let (simulation_ids, simulation_inputs): (Vec<String>, Vec<SimulationInput>) =
             inputs.into_iter().unzip();
 
-        // Pending (flashblock) blocks have a zero hash — simulate against the pending state
-        // so the RPC uses the sequencer's pre-confirmed block rather than a specific number.
-        let block_id = if block.header.hash == B256::ZERO {
-            BlockId::from(BlockNumberOrTag::Pending)
-        } else {
-            BlockId::from(block.number())
-        };
+        let (block_id, block_overrides) = simulation_target(block);
 
         let client = ClientBuilder::default().http(self.rpc_url.parse()?);
 
@@ -216,7 +210,7 @@ impl ExecutionSimulator {
             let trace_options = GethDebugTracingCallOptions {
                 tracing_options: tracing_options.clone(),
                 state_overrides: input.state_overwrites.clone(),
-                block_overrides: None,
+                block_overrides: block_overrides.clone(),
                 tx_index: None,
             };
             let fut =
@@ -511,9 +505,55 @@ impl ExecutionSimulator {
     }
 }
 
+/// Returns the block to simulate against, plus the header fields to pin for a pending block.
+///
+/// A pending (flashblock) block has a zero hash and cannot be fetched by number, so it is
+/// simulated against the RPC's `pending` block. The RPC builds that block's environment itself,
+/// which need not match the flashblock: some nodes assume a 12s slot. Pinning the flashblock's
+/// number and timestamp keeps contracts that check price freshness on the quoted block's clock.
+/// A confirmed block is simulated by number with no overrides.
+fn simulation_target(block: &Block) -> (BlockId, Option<BlockOverrides>) {
+    if block.header.hash == B256::ZERO {
+        let overrides = BlockOverrides::default()
+            .with_number(U256::from(block.number()))
+            .with_time(block.header.timestamp);
+        (BlockId::from(BlockNumberOrTag::Pending), Some(overrides))
+    } else {
+        (BlockId::from(block.number()), None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block(hash: B256, number: u64, timestamp: u64) -> Block {
+        let mut block: Block = Block::empty(Default::default());
+        block.header.hash = hash;
+        block.header.inner.number = number;
+        block.header.inner.timestamp = timestamp;
+        block
+    }
+
+    #[test]
+    fn test_pending_block_pins_number_and_timestamp() {
+        let (block_id, overrides) =
+            simulation_target(&block(B256::ZERO, 51_780_665, 1_790_350_677));
+
+        assert_eq!(block_id, BlockId::from(BlockNumberOrTag::Pending));
+        let overrides = overrides.expect("a pending block must pin its header fields");
+        assert_eq!(overrides.number, Some(U256::from(51_780_665u64)));
+        assert_eq!(overrides.time, Some(1_790_350_677));
+    }
+
+    #[test]
+    fn test_confirmed_block_is_simulated_by_number_without_overrides() {
+        let (block_id, overrides) =
+            simulation_target(&block(B256::repeat_byte(0x11), 51_780_664, 1_790_350_675));
+
+        assert_eq!(block_id, BlockId::from(51_780_664u64));
+        assert_eq!(overrides, None);
+    }
 
     #[test]
     fn test_parse_signature() {
