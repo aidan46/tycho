@@ -54,7 +54,7 @@ use tycho_common::{
         protocol::{ComponentBalance, ProtocolComponentStateDelta},
         Address,
     },
-    storage::{BlockIdentifier, BlockOrTimestamp, StorageError},
+    storage::{BlockIdentifier, BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
 
@@ -129,8 +129,10 @@ pub(crate) enum WindowResolution {
 /// One block's changes to a component, as captured from the window.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ComponentChange {
-    /// Block number the change belongs to.
-    pub block: u64,
+    /// The block the change belongs to.
+    pub at: WriteTimestamp,
+    /// Whether the block created the component.
+    pub created: bool,
     /// State delta of the block, if the block changed the component's state.
     pub delta: Option<ProtocolComponentStateDelta>,
     /// Token balances of the block, if the block changed the component's balances.
@@ -140,8 +142,8 @@ pub(crate) struct ComponentChange {
 /// One block's changes to an account, as captured from the window.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AccountChange {
-    /// Block number the change belongs to.
-    pub block: u64,
+    /// The block the change belongs to.
+    pub at: WriteTimestamp,
     /// Account delta of the block, if the block changed the account.
     pub delta: Option<AccountDelta>,
     /// Token balances of the block, if the block changed the account's balances.
@@ -427,19 +429,22 @@ impl DeltaWindow {
     ) -> Result<WindowPatch, StorageError> {
         let mut patch = WindowPatch::default();
         for entry in self.blocks(None, upto)? {
-            let block = entry.block.number;
+            let at = WriteTimestamp::from(&entry.block);
             for id in components {
+                let created = entry
+                    .new_protocol_components
+                    .contains_key(*id);
                 let delta = entry.state_deltas.get(*id).cloned();
                 let balances = entry
                     .component_balances
                     .get(*id)
                     .cloned();
-                if delta.is_some() || balances.is_some() {
+                if created || delta.is_some() || balances.is_some() {
                     patch
                         .components
                         .entry(id.to_string())
                         .or_default()
-                        .push(ComponentChange { block, delta, balances });
+                        .push(ComponentChange { at, created, delta, balances });
                 }
             }
             for address in accounts {
@@ -456,7 +461,7 @@ impl DeltaWindow {
                         .accounts
                         .entry(address.clone())
                         .or_default()
-                        .push(AccountChange { block, delta, balances });
+                        .push(AccountChange { at, delta, balances });
                 }
             }
         }
@@ -683,13 +688,13 @@ mod test {
 
         let component_blocks: Vec<u64> = patch.components["c1"]
             .iter()
-            .map(|c| c.block)
+            .map(|c| c.at.block_number())
             .collect();
         assert_eq!(component_blocks, vec![2, 4]);
         assert!(!patch.components.contains_key("absent"));
         let account_blocks: Vec<u64> = patch.accounts[&address]
             .iter()
-            .map(|c| c.block)
+            .map(|c| c.at.block_number())
             .collect();
         assert_eq!(account_blocks, vec![3, 5]);
         assert!(patch.components["c1"]
@@ -713,7 +718,7 @@ mod test {
             .unwrap();
         let blocks = patch.components["c1"]
             .iter()
-            .map(|change| change.block)
+            .map(|change| change.at.block_number())
             .collect::<Vec<_>>();
         let latest = w.tip().unwrap();
 
@@ -743,12 +748,42 @@ mod test {
 
         assert_eq!(
             patch.components["c1"],
-            vec![ComponentChange { block: 1, delta: None, balances: Some(HashMap::new()) }]
+            vec![ComponentChange {
+                at: WriteTimestamp::from(&testing::block(1)),
+                created: false,
+                delta: None,
+                balances: Some(HashMap::new())
+            }]
         );
         assert_eq!(
             patch.accounts[&address],
-            vec![AccountChange { block: 2, delta: None, balances: Some(HashMap::new()) }]
+            vec![AccountChange {
+                at: WriteTimestamp::from(&testing::block(2)),
+                delta: None,
+                balances: Some(HashMap::new())
+            }]
         );
+    }
+
+    #[test]
+    fn capture_patch_marks_the_block_that_created_a_component() {
+        let mut created = msg(1, 0, None);
+        created
+            .new_protocol_components
+            .insert("c1".to_string(), Default::default());
+        let mut w = window(128, 1);
+        put(&mut w, created).unwrap();
+        put(&mut w, testing::with_state_delta(msg(2, 0, None), "c1", 2)).unwrap();
+
+        let patch = w
+            .capture_patch(&["c1"], &[], None)
+            .unwrap();
+
+        let created: Vec<bool> = patch.components["c1"]
+            .iter()
+            .map(|c| c.created)
+            .collect();
+        assert_eq!(created, vec![true, false]);
     }
 
     #[test]
@@ -764,7 +799,7 @@ mod test {
 
         let blocks: Vec<u64> = patch.components["c1"]
             .iter()
-            .map(|c| c.block)
+            .map(|c| c.at.block_number())
             .collect();
         assert_eq!(blocks, vec![5]);
     }

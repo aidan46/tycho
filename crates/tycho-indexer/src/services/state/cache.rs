@@ -267,6 +267,24 @@ impl CachedAccount {
         }
     }
 
+    /// Timestamp of the newest write to any value of the account.
+    pub(crate) fn newest_write(&self) -> WriteTimestamp {
+        self.slots
+            .values()
+            .map(Timestamped::written_at)
+            .chain(
+                self.token_balances
+                    .values()
+                    .map(Timestamped::written_at),
+            )
+            .fold(
+                self.native_balance
+                    .written_at()
+                    .max(self.code.written_at()),
+                WriteTimestamp::max,
+            )
+    }
+
     pub(crate) fn slots(&self) -> &HashMap<StoreKey, Timestamped<StoreVal>> {
         &self.slots
     }

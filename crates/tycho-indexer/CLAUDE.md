@@ -47,7 +47,7 @@ services/
   state/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
     cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup, wired into the services by ENG-6293
-    service.rs              StateService — answers contract/protocol state from cache ⊕ window; EntityCacheSetup routing (skeleton, ENG-6293)
+    service.rs              StateService — answers contract/protocol state from cache ⊕ window; EntityCacheSetup routing
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
