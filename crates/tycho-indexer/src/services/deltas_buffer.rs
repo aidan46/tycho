@@ -21,12 +21,14 @@ use tycho_common::{
     Bytes,
 };
 
+#[cfg(test)]
+use crate::services::state::window::{new_windows, DiscardSink, WindowConfig};
 use crate::{
     extractor::{
         reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
         DeltaCommand,
     },
-    services::state::window::{new_windows, DeltaWindow, DiscardSink, FoldSink, WindowConfig},
+    services::state::window::{DeltaWindow, FoldSink},
 };
 
 /// Facade over one [`DeltaWindow`] per extractor.
@@ -102,18 +104,9 @@ pub trait PendingDeltasBuffer {
 
 impl PendingDeltas {
     /// Windows at the default depth, folding into a [`DiscardSink`].
-    #[allow(dead_code)] // production builds the facade through `with_config`
+    #[cfg(test)]
     pub fn new<'a>(extractors: impl IntoIterator<Item = &'a str>) -> Self {
-        Self::with_config(extractors, WindowConfig::default(), Arc::new(DiscardSink))
-    }
-
-    /// One empty window per extractor, all with the same `config`, folding into `sink`.
-    pub fn with_config<'a>(
-        extractors: impl IntoIterator<Item = &'a str>,
-        config: WindowConfig,
-        sink: Arc<dyn FoldSink>,
-    ) -> Self {
-        Self::from_windows(new_windows(extractors, config), sink)
+        Self::from_windows(new_windows(extractors, WindowConfig::default()), Arc::new(DiscardSink))
     }
 
     /// A facade over existing windows, keyed by extractor name, folding into `sink`. The
@@ -924,8 +917,10 @@ mod test {
     #[tokio::test]
     async fn run_folds_committed_blocks_and_clears_the_window_when_the_extractor_restarts() {
         let sink = Arc::new(RecordingSink::default());
-        let buffer =
-            PendingDeltas::with_config(["native:extractor"], WindowConfig::default(), sink.clone());
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["native:extractor"], WindowConfig::default()),
+            sink.clone(),
+        );
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         // `run` sends the start signal into this buffered channel; nothing needs to receive it.
         let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
@@ -993,9 +988,8 @@ mod test {
 
     #[test]
     fn depth_one_retains_only_the_tip() {
-        let buffer = PendingDeltas::with_config(
-            ["native:extractor"],
-            WindowConfig { depth: 1, min_fold_batch: 1 },
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["native:extractor"], WindowConfig { depth: 1, min_fold_batch: 1 }),
             Arc::new(DiscardSink),
         );
         for n in 1..=5 {
@@ -1327,9 +1321,8 @@ mod test {
     #[test]
     fn test_insert_respects_db_committed_height() {
         // depth 1 alone would allow evicting up to block 2; the commit height must hold it back
-        let buffer = PendingDeltas::with_config(
-            ["vm:extractor"],
-            WindowConfig { depth: 1, min_fold_batch: 1 },
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["vm:extractor"], WindowConfig { depth: 1, min_fold_batch: 1 }),
             Arc::new(DiscardSink),
         );
 
