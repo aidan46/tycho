@@ -28,7 +28,7 @@ use crate::{
         middleware::{compression_middleware, rpc_metrics_middleware},
         state::{
             service::StateService,
-            window::{DiscardSink, FoldSink},
+            window::{new_windows, DiscardSink, FoldSink},
         },
     },
 };
@@ -206,13 +206,13 @@ where
             Some(cache) => cache.clone(),
             None => Arc::new(DiscardSink),
         };
-        let pending_deltas = PendingDeltas::with_config(
+        let windows = new_windows(
             self.extractor_handles
                 .keys()
                 .map(|e_id| e_id.name.as_str()),
             self.window_config,
-            sink,
         );
+        let pending_deltas = PendingDeltas::from_windows(windows.clone(), sink);
         info!(
             depth = self.window_config.depth,
             min_fold_batch = self.window_config.min_fold_batch,
@@ -239,7 +239,7 @@ where
         let state_service = self
             .entity_cache
             .clone()
-            .map(|cache| Arc::new(StateService::new(pending_deltas.windows().clone(), cache)));
+            .map(|cache| Arc::new(StateService::new(windows, cache)));
 
         let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
         let (server_handle, server_task) = self.start_server(

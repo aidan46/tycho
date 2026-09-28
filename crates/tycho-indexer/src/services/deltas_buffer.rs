@@ -26,7 +26,7 @@ use crate::{
         reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
         DeltaCommand,
     },
-    services::state::window::{DeltaWindow, DiscardSink, FoldSink, WindowConfig},
+    services::state::window::{new_windows, DeltaWindow, DiscardSink, FoldSink, WindowConfig},
 };
 
 /// Facade over one [`DeltaWindow`] per extractor.
@@ -113,19 +113,16 @@ impl PendingDeltas {
         config: WindowConfig,
         sink: Arc<dyn FoldSink>,
     ) -> Self {
-        let windows = extractors
-            .into_iter()
-            .map(|e| {
-                debug!("Creating new DeltaWindow for {}", e);
-                (e.to_string(), Arc::new(Mutex::new(DeltaWindow::new(e.to_string(), config))))
-            })
-            .collect();
-        Self { windows, sink }
+        Self::from_windows(new_windows(extractors, config), sink)
     }
 
-    /// Every window, keyed by protocol system. The windows are shared, not copied.
-    pub(crate) fn windows(&self) -> &HashMap<String, Arc<Mutex<DeltaWindow>>> {
-        &self.windows
+    /// A facade over existing windows, keyed by extractor name, folding into `sink`. The
+    /// windows stay shared with every other holder of the map.
+    pub(crate) fn from_windows(
+        windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
+        sink: Arc<dyn FoldSink>,
+    ) -> Self {
+        Self { windows, sink }
     }
 
     /// Folds one extractor's committed blocks into the sink, then empties its window. Nothing
@@ -905,6 +902,23 @@ mod test {
                 .push(block.block.number);
             Ok(())
         }
+    }
+
+    #[test]
+    fn from_windows_shares_the_windows_with_the_caller() {
+        let windows = new_windows(["native:extractor"], WindowConfig::default());
+        let buffer = PendingDeltas::from_windows(windows.clone(), Arc::new(DiscardSink));
+
+        buffer
+            .insert(&native_msg(1, None, 1))
+            .unwrap();
+
+        let tip = windows["native:extractor"]
+            .lock()
+            .unwrap()
+            .tip()
+            .map(|block| block.number);
+        assert_eq!(tip, Some(1));
     }
 
     #[tokio::test]

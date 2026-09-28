@@ -40,13 +40,13 @@
 
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use deepsize::DeepSizeOf;
 use metrics::histogram;
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 use tycho_common::{
     models::{
         blockchain::{Block, BlockAggregatedChanges},
@@ -85,6 +85,24 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self { depth: 128, min_fold_batch: 1 }
     }
+}
+
+/// One empty window per extractor, keyed by extractor name, all with the same `config`. The
+/// windows are shared: every holder of the map reads and writes the same windows.
+pub(crate) fn new_windows<'a>(
+    extractors: impl IntoIterator<Item = &'a str>,
+    config: WindowConfig,
+) -> HashMap<String, Arc<Mutex<DeltaWindow>>> {
+    extractors
+        .into_iter()
+        .map(|extractor| {
+            debug!(extractor, "Creating DeltaWindow");
+            (
+                extractor.to_string(),
+                Arc::new(Mutex::new(DeltaWindow::new(extractor.to_string(), config))),
+            )
+        })
+        .collect()
 }
 
 /// Drops every folded block.
