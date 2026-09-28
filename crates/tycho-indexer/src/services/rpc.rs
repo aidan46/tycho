@@ -575,7 +575,9 @@ where
                 let protocol_components = self
                     .get_protocol_components_inner(req)
                     .await
-                    .expect("Failed to get protocol component IDs");
+                    .map_err(|err| {
+                        RpcError::Unknown(format!("Failed to get protocol component IDs: {err}"))
+                    })?;
                 let total_components = protocol_components.pagination.total;
                 (
                     protocol_components
