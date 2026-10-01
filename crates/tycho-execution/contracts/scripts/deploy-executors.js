@@ -58,6 +58,7 @@ const deploy_protocols = {
         "fallback:rfq:metric",
         "fallback:rfq:bebop",
         "pancakeswap_infinity_cl",
+        "pancakeswap_infinity_bin",
     ],
     "unichain": [
         "uniswap_v2",
@@ -88,7 +89,8 @@ const deploy_protocols = {
         "uniswap_v4",
         "native_wrapper",
         "rfq:native",
-        "pancakeswap_infinity_cl"
+        "pancakeswap_infinity_cl",
+        "pancakeswap_infinity_bin"
     ],
     "plasma": [
         "uniswap_v3",

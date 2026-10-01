@@ -29,6 +29,4 @@ tests:
           bin_step: "0x000a"
         creation_tx: "0x3839d52a9c8e8b22f6eead472c2aacd889635079b3bf55fc9461f3dda441c6a6"
         skip_simulation: false
-        # Until the executor carries a pancakeswap_infinity_bin address in
-        # test_executor_addresses.json.
-        skip_execution: true
+        skip_execution: false

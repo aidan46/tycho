@@ -31,6 +31,40 @@ function usdcUsdtSwapData(address tokenIn, address tokenOut, bool zeroForOne)
     );
 }
 
+/// The live Base USDC/USDT Bin pool: static LP fee 7 pips, bin step 10, no hook. `parameters`
+/// packs the bin step above the hook bitmap, the same slot the CL pool uses for tick spacing.
+function usdcUsdtBinSwapData(address tokenIn, address tokenOut, bool zeroForOne)
+    pure
+    returns (bytes memory)
+{
+    return abi.encodePacked(
+        tokenIn,
+        tokenOut,
+        zeroForOne,
+        uint8(1), // Bin
+        uint24(7),
+        bytes32(uint256(10) << 16),
+        address(0)
+    );
+}
+
+/// The live Base ETH/USDC Bin pool: static LP fee 201 pips, bin step 10, no hook. Native sorts
+/// first, so ETH is currency0 and `zeroForOne` is true only when ETH is the input.
+function ethUsdcBinSwapData(address tokenIn, address tokenOut, bool zeroForOne)
+    pure
+    returns (bytes memory)
+{
+    return abi.encodePacked(
+        tokenIn,
+        tokenOut,
+        zeroForOne,
+        uint8(1), // Bin
+        uint24(201),
+        bytes32(uint256(10) << 16),
+        address(0)
+    );
+}
+
 contract PancakeswapInfinityExecutorExposed is PancakeswapInfinityExecutor {
     constructor()
         PancakeswapInfinityExecutor(
@@ -196,7 +230,8 @@ contract PancakeswapInfinityExecutorTest is Constants, TestUtils {
 /**
  * Router-level setup check: the executor deploys and is whitelisted with the others in
  * TychoRouterTestSetup.deployExecutors, at the deterministic address committed in
- * config/test_executor_addresses.json ("base" -> "pancakeswap_infinity_cl").
+ * config/test_executor_addresses.json under both "pancakeswap_infinity_cl" and
+ * "pancakeswap_infinity_bin" on "base": one executor serves both pool types.
  */
 contract TychoRouterForPancakeswapInfinityTest is TychoRouterTestSetup {
     function getChain() public pure override returns (string memory) {
@@ -261,6 +296,103 @@ contract TychoRouterForPancakeswapInfinityTest is TychoRouterTestSetup {
         assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(BASE_USDT).balanceOf(tychoRouterAddr), 0);
     }
+
+    /// Same path with poolType 1, which routes the swap to the Bin manager instead. The Bin pool
+    /// is shallow at this block, so the input is 1 USDC rather than the CL case's 1000.
+    function testSingleSwapBin() public {
+        uint256 amountIn = 1e6;
+        uint256 expAmountOut = 1000026;
+        deal(BASE_USDC, ALICE, amountIn);
+        uint256 balanceBefore = IERC20(BASE_USDT).balanceOf(ALICE);
+
+        bytes memory swap = encodeSingleSwap(
+            address(pancakeswapInfinityExecutor),
+            usdcUsdtBinSwapData(BASE_USDC, BASE_USDT, true)
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(BASE_USDC).approve(tychoRouterAddr, amountIn);
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            BASE_USDC,
+            BASE_USDT,
+            expAmountOut,
+            expAmountOut,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+        vm.stopPrank();
+
+        assertEq(amountOut, expAmountOut);
+        assertEq(
+            IERC20(BASE_USDT).balanceOf(ALICE) - balanceBefore, expAmountOut
+        );
+        assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(BASE_USDT).balanceOf(tychoRouterAddr), 0);
+    }
+
+    /// Both native legs on the only live pool that can serve them. Native is `address(0)` inside
+    /// Infinity and ETH_ADDRESS everywhere else, so this is the only coverage of `settle{value:}`,
+    /// `take(address(0), ..)` and TransferNativeInExecutor. Only bins above the active one hold
+    /// ETH at this block, so USDC -> ETH has to run first: the USDC it leaves in the bins it
+    /// crosses is the only liquidity ETH -> USDC can take, hence the second leg buys back half of
+    /// what the first sold. ETH goes to BOB because ALICE is a hardcoded address that holds a
+    /// forwarding contract on Base, which would make the balance diff read zero.
+    function testSingleSwapBinNative() public {
+        uint256 usdcIn = 100_000;
+        uint256 expEthOut = 30416960559745;
+        deal(BASE_USDC, ALICE, usdcIn);
+        uint256 ethBefore = BOB.balance;
+
+        vm.startPrank(ALICE);
+        IERC20(BASE_USDC).approve(tychoRouterAddr, usdcIn);
+        uint256 ethOut = tychoRouter.singleSwap(
+            usdcIn,
+            BASE_USDC,
+            ETH_ADDRESS,
+            expEthOut,
+            expEthOut,
+            BOB,
+            noClientFee(),
+            encodeSingleSwap(
+                address(pancakeswapInfinityExecutor),
+                ethUsdcBinSwapData(BASE_USDC, ETH_ADDRESS, false)
+            )
+        );
+        vm.stopPrank();
+
+        assertEq(ethOut, expEthOut);
+        assertEq(BOB.balance - ethBefore, expEthOut, "BOB did not get the ETH");
+
+        uint256 ethIn = expEthOut / 2;
+        uint256 expUsdcOut = 49_999;
+        uint256 usdcBefore = IERC20(BASE_USDC).balanceOf(BOB);
+
+        vm.prank(BOB);
+        uint256 usdcOut = tychoRouter.singleSwap{value: ethIn}(
+            ethIn,
+            ETH_ADDRESS,
+            BASE_USDC,
+            expUsdcOut,
+            expUsdcOut,
+            BOB,
+            noClientFee(),
+            encodeSingleSwap(
+                address(pancakeswapInfinityExecutor),
+                ethUsdcBinSwapData(ETH_ADDRESS, BASE_USDC, true)
+            )
+        );
+
+        assertEq(usdcOut, expUsdcOut);
+        assertEq(
+            IERC20(BASE_USDC).balanceOf(BOB) - usdcBefore,
+            expUsdcOut,
+            "BOB did not get the USDC"
+        );
+        assertEq(tychoRouterAddr.balance, 0, "router kept ETH");
+        assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), 0);
+    }
 }
 
 contract PancakeswapInfinityForkTest is Constants, TestUtils {
@@ -276,7 +408,17 @@ contract PancakeswapInfinityForkTest is Constants, TestUtils {
     function _assertSwap(address tokenIn, address tokenOut, bytes memory data)
         internal
     {
-        uint256 amountIn = 1000e6;
+        _assertSwap(tokenIn, tokenOut, data, 1000e6);
+    }
+
+    /// @dev The Bin pool is far shallower than the CL one at this block, so its cases size the
+    /// input themselves rather than draining the pool and reverting BinPool__OutOfLiquidity.
+    function _assertSwap(
+        address tokenIn,
+        address tokenOut,
+        bytes memory data,
+        uint256 amountIn
+    ) internal {
         deal(tokenIn, address(executor), amountIn);
         executor.swap(amountIn, data, ALICE);
         assertGt(IERC20(tokenOut).balanceOf(ALICE), 0);
@@ -300,5 +442,30 @@ contract PancakeswapInfinityForkTest is Constants, TestUtils {
             loadCallDataFromFile("test_encode_pancakeswap_infinity_cl_swap");
         assertEq(data.length, 97);
         _assertSwap(BASE_USDC, BASE_USDT, data);
+    }
+
+    function testSwapBinUsdcToUsdt() public {
+        _assertSwap(
+            BASE_USDC,
+            BASE_USDT,
+            usdcUsdtBinSwapData(BASE_USDC, BASE_USDT, true),
+            1e6
+        );
+    }
+
+    function testSwapBinUsdtToUsdc() public {
+        _assertSwap(
+            BASE_USDT,
+            BASE_USDC,
+            usdcUsdtBinSwapData(BASE_USDT, BASE_USDC, false),
+            1e6
+        );
+    }
+
+    function testSwapBinMatchesEncoderCalldata() public {
+        bytes memory data =
+            loadCallDataFromFile("test_encode_pancakeswap_infinity_bin_swap");
+        assertEq(data.length, 97);
+        _assertSwap(BASE_USDC, BASE_USDT, data, 1e6);
     }
 }
