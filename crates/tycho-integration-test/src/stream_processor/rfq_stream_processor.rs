@@ -14,18 +14,24 @@ use tycho_common::{
     Bytes,
 };
 use tycho_simulation::rfq::{
+    models::ComponentLayout,
     protocols::{
-        bebop::{client::BebopClient, client_builder::BebopClientBuilder, state::BebopState},
+        bebop::{
+            client::BebopClient, client_builder::BebopClientBuilder, state::BebopState,
+            venue_state::BebopVenueState,
+        },
         hashflow::{
             client::HashflowClient, client_builder::HashflowClientBuilder, state::HashflowState,
+            venue_state::HashflowVenueState,
         },
         liquorice::{
             client::LiquoriceClient, client_builder::LiquoriceClientBuilder, state::LiquoriceState,
+            venue_state::LiquoriceVenueState,
         },
         metric::{client::MetricClient, client_builder::MetricClientBuilder, state::MetricState},
         native::{
             client::NativeClient, client_builder::NativeClientBuilder,
-            models::NativeSupportedChain, state::NativeState,
+            models::NativeSupportedChain, state::NativeState, venue_state::NativeVenueState,
         },
     },
     stream::RFQStreamBuilder,
@@ -60,6 +66,7 @@ pub struct RFQStreamProcessor {
     rfq_credentials: HashMap<RFQProtocol, (String, String)>,
     sample_size: usize,
     run_pamm_protocols: bool,
+    component_layout: ComponentLayout,
     /// The protocol's stream will skip messages for this duration after processing a message
     skip_messages_duration: Duration,
 }
@@ -123,8 +130,15 @@ impl RFQStreamProcessor {
             rfq_credentials,
             sample_size,
             run_pamm_protocols,
+            component_layout: ComponentLayout::PerPair,
             skip_messages_duration,
         })
+    }
+
+    /// The components the RFQ clients stream. One per pair, by default.
+    pub fn with_component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
     }
 
     pub async fn run_stream(
@@ -167,11 +181,19 @@ impl RFQStreamProcessor {
                     let bebop_client = BebopClientBuilder::new(self.chain, key.clone())
                         .tokens(rfq_tokens.clone())
                         .tvl_threshold(self.tvl_threshold)
+                        .component_layout(self.component_layout)
                         .build()
                         .into_diagnostic()
                         .wrap_err("Failed to create Bebop RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<BebopState>("bebop", Box::new(bebop_client));
+                    rfq_stream_builder = match self.component_layout {
+                        ComponentLayout::PerPair => rfq_stream_builder
+                            .add_client::<BebopState>("bebop", Box::new(bebop_client)),
+                        ComponentLayout::PerChain => rfq_stream_builder
+                            .add_client::<BebopVenueState>(
+                                "bebop_per_chain",
+                                Box::new(bebop_client),
+                            ),
+                    };
                 }
                 RFQProtocol::Hashflow => {
                     let hashflow_client =
@@ -179,11 +201,19 @@ impl RFQStreamProcessor {
                             .tokens(rfq_tokens.clone())
                             .tvl_threshold(self.tvl_threshold)
                             .poll_time(Duration::from_secs(30))
+                            .component_layout(self.component_layout)
                             .build()
                             .into_diagnostic()
                             .wrap_err("Failed to create Hashflow RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<HashflowState>("hashflow", Box::new(hashflow_client))
+                    rfq_stream_builder = match self.component_layout {
+                        ComponentLayout::PerPair => rfq_stream_builder
+                            .add_client::<HashflowState>("hashflow", Box::new(hashflow_client)),
+                        ComponentLayout::PerChain => rfq_stream_builder
+                            .add_client::<HashflowVenueState>(
+                                "hashflow_per_chain",
+                                Box::new(hashflow_client),
+                            ),
+                    };
                 }
                 RFQProtocol::Liquorice => {
                     let liquorice_client =
@@ -191,22 +221,38 @@ impl RFQStreamProcessor {
                             .tokens(rfq_tokens.clone())
                             .tvl_threshold(self.tvl_threshold)
                             .poll_time(Duration::from_secs(30))
+                            .component_layout(self.component_layout)
                             .build()
                             .into_diagnostic()
                             .wrap_err("Failed to create Liquorice RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+                    rfq_stream_builder = match self.component_layout {
+                        ComponentLayout::PerPair => rfq_stream_builder
+                            .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client)),
+                        ComponentLayout::PerChain => rfq_stream_builder
+                            .add_client::<LiquoriceVenueState>(
+                                "liquorice_per_chain",
+                                Box::new(liquorice_client),
+                            ),
+                    };
                 }
                 RFQProtocol::Native => {
                     let native_client = NativeClientBuilder::new(self.chain, key.clone())
                         .tokens(rfq_tokens.clone())
                         .tvl_threshold(self.tvl_threshold)
                         .poll_time(Duration::from_secs(30))
+                        .component_layout(self.component_layout)
                         .build()
                         .into_diagnostic()
                         .wrap_err("Failed to create Native RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<NativeState>("native", Box::new(native_client))
+                    rfq_stream_builder = match self.component_layout {
+                        ComponentLayout::PerPair => rfq_stream_builder
+                            .add_client::<NativeState>("native", Box::new(native_client)),
+                        ComponentLayout::PerChain => rfq_stream_builder
+                            .add_client::<NativeVenueState>(
+                                "native_per_chain",
+                                Box::new(native_client),
+                            ),
+                    };
                 }
                 RFQProtocol::Metric => unreachable!("Metric RFQ does not use credential storage"),
             }

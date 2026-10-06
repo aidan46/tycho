@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
     sync::LazyLock,
     time::SystemTime,
@@ -24,7 +24,7 @@ use crate::{
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
+        models::{ComponentLayout, QuoteRule, TimestampHeader},
         protocols::{
             component,
             native::models::{
@@ -85,6 +85,8 @@ pub struct NativeClient {
     quote_tokens: HashSet<Bytes>,
     poll_time: Duration,
     quote_timeout: Duration,
+    #[serde(default)]
+    component_layout: ComponentLayout,
 }
 
 impl NativeClient {
@@ -147,7 +149,22 @@ impl NativeClient {
             quote_tokens,
             poll_time,
             quote_timeout,
+            component_layout: ComponentLayout::PerPair,
         })
+    }
+
+    pub(crate) fn with_component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
+    }
+
+    /// The name the client's stream tags its messages with. The two layouts use different names,
+    /// so one stream builder can carry a client of each.
+    fn stream_name(&self) -> &'static str {
+        match self.component_layout {
+            ComponentLayout::PerPair => "native",
+            ComponentLayout::PerChain => "native_per_chain",
+        }
     }
 
     fn select_tvl_conversion_book<'a>(
@@ -291,6 +308,55 @@ impl NativeClient {
             new_components.insert(component_id.to_string(), component_with_state);
         }
         new_components
+    }
+
+    /// The id of the per-chain component.
+    pub fn component_id(&self) -> String {
+        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
+    }
+
+    /// The venue component for one poll: every book in `priced_books` that has bids or asks.
+    /// `None` when there is none. A book's bids serve its base token in, its asks its quote token
+    /// in.
+    fn venue_component(
+        &self,
+        grouped_books: &HashMap<String, NativePriceData>,
+    ) -> Result<Option<ComponentWithState>, RFQError> {
+        let mut books = Vec::new();
+        let mut tvl = 0.0;
+        for (_, book, book_tvl) in self.priced_books(grouped_books) {
+            if book.bids.is_empty() && book.asks.is_empty() {
+                continue;
+            }
+            tvl += book_tvl;
+            books.push(book.clone());
+        }
+        if books.is_empty() {
+            return Ok(None);
+        }
+        books.sort_by(|a, b| {
+            (&a.base_address, &a.quote_address).cmp(&(&b.base_address, &b.quote_address))
+        });
+
+        let mut swap_directions = BTreeSet::new();
+        for book in &books {
+            if !book.bids.is_empty() {
+                swap_directions.insert((book.base_address.clone(), book.quote_address.clone()));
+            }
+            if !book.asks.is_empty() {
+                swap_directions.insert((book.quote_address.clone(), book.base_address.clone()));
+            }
+        }
+        let component = component::venue_component(
+            Self::PROTOCOL_SYSTEM,
+            "native_relay_pool",
+            self.chain,
+            &swap_directions,
+            &books,
+            tvl,
+            QuoteRule::OncePerVenue,
+        )?;
+        Ok(Some(component))
     }
 
     async fn fetch_orderbook(&self) -> Result<Vec<NativeOrderbookEntry>, RFQError> {
@@ -758,10 +824,22 @@ impl RFQClient for NativeClient {
                     }
                 };
 
-                let components = client.pair_components(&books);
+                let components = match client.component_layout {
+                    ComponentLayout::PerPair => client.pair_components(&books),
+                    ComponentLayout::PerChain => match client.venue_component(&books) {
+                        Ok(component) => component
+                            .into_iter()
+                            .map(|component| (component.component.id.clone(), component))
+                            .collect(),
+                        Err(e) => {
+                            error!("Failed to build the Native Relay component: {}", e);
+                            continue;
+                        }
+                    },
+                };
                 let timestamp = component::unix_timestamp().unwrap_or_default();
                 let msg = component::poll_message(&mut current_components, components, timestamp);
-                yield Ok(("native".to_string(), msg));
+                yield Ok((client.stream_name().to_string(), msg));
             }
         })
     }
@@ -852,7 +930,10 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::native::client_builder::NativeClientBuilder;
+    use crate::rfq::protocols::{
+        component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
+        native::client_builder::NativeClientBuilder,
+    };
 
     fn successful_quote_json(amount_in: &str) -> serde_json::Value {
         let calldata = format!("0x7083527c{:064x}{:064x}{:064x}", 0x60u8, 0u8, 0u8);
@@ -1076,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_indexer_compatible_component_from_relay_orderbook() {
+    fn creates_per_pair_component_from_relay_orderbook() {
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
         let client = NativeClient::new(
@@ -1149,6 +1230,82 @@ mod tests {
         assert_eq!(decoded_book.asks.len(), 1);
         assert_eq!(decoded_book.bids[0].quantity, 0.0001);
         assert_eq!(decoded_book.bids[0].price, 3213.12345);
+    }
+
+    #[test]
+    fn creates_venue_component_from_relay_orderbook() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
+        let client = NativeClient::new(
+            Chain::Ethereum,
+            "test-api-key".to_string(),
+            HashSet::from([weth.clone(), usdt.clone()]),
+            0.0,
+            HashSet::from([usdt.clone()]),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let books = client.group_orderbook(vec![
+            NativeOrderbookEntry {
+                base_address: weth.clone(),
+                quote_address: usdt.clone(),
+                minimum_in_base: 0.0,
+                side: NativeOrderbookSide::Bid,
+                levels: vec![NativePriceLevel { quantity: 0.0001, price: 3213.12345 }],
+            },
+            NativeOrderbookEntry {
+                base_address: weth.clone(),
+                quote_address: usdt.clone(),
+                minimum_in_base: 0.0,
+                side: NativeOrderbookSide::Ask,
+                levels: vec![NativePriceLevel { quantity: 2.0, price: 3214.0 }],
+            },
+            NativeOrderbookEntry {
+                base_address: usdt.clone(),
+                quote_address: weth.clone(),
+                minimum_in_base: 100.0,
+                side: NativeOrderbookSide::Bid,
+                levels: vec![NativePriceLevel { quantity: 6428.0, price: 1.0 / 3214.0 }],
+            },
+            NativeOrderbookEntry {
+                base_address: usdt.clone(),
+                quote_address: weth.clone(),
+                minimum_in_base: 100.0,
+                side: NativeOrderbookSide::Ask,
+                levels: vec![NativePriceLevel { quantity: 0.321312345, price: 1.0 / 3213.12345 }],
+            },
+        ]);
+
+        let component = client
+            .venue_component(&books)
+            .unwrap()
+            .expect("the book clears the threshold");
+
+        assert_eq!(component.component.id, client.component_id());
+        assert_eq!(component.component.protocol_system, NativeClient::PROTOCOL_SYSTEM);
+        assert_eq!(component.component.protocol_type_name, "native_relay_pool");
+        let mut expected_tokens = vec![weth.clone(), usdt.clone()];
+        expected_tokens.sort();
+        assert_eq!(component.component.tokens, expected_tokens);
+        assert_eq!(component.state.component_id, client.component_id());
+        assert_eq!(
+            component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].len(),
+            80,
+            "bids and asks"
+        );
+        assert_eq!(
+            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
+            b"once_per_venue"
+        );
+        let decoded_books: Vec<NativePriceData> =
+            serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
+        assert_eq!(decoded_books.len(), 1);
+        assert_eq!(decoded_books[0].bids.len(), 1);
+        assert_eq!(decoded_books[0].asks.len(), 1);
+        assert_eq!(decoded_books[0].bids[0].quantity, 0.0001);
+        assert_eq!(decoded_books[0].bids[0].price, 3213.12345);
     }
 
     #[test]
@@ -1777,6 +1934,7 @@ mod tests {
         #[case] include_helper: bool,
         #[case] tvl_threshold: f64,
         #[case] expected_tvl: Option<f64>,
+        #[values(ComponentLayout::PerPair, ComponentLayout::PerChain)] layout: ComponentLayout,
     ) {
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
@@ -1801,7 +1959,8 @@ mod tests {
         }
         let (address, _) =
             create_quote_server("200 OK", serde_json::to_string(&entries).unwrap()).await;
-        let mut client = create_test_client(format!("http://{address}"));
+        let mut client =
+            create_test_client(format!("http://{address}")).with_component_layout(layout);
         client.tokens = HashSet::from([weth.clone(), usdt.clone()]);
         client.quote_tokens = HashSet::from([usdc]);
         client.tvl = tvl_threshold;

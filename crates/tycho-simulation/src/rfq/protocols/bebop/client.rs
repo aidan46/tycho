@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
 };
 
@@ -27,7 +27,7 @@ use crate::{
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
+        models::{ComponentLayout, QuoteRule, TimestampHeader},
         protocols::{
             bebop::models::{
                 BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse,
@@ -81,6 +81,8 @@ pub struct BebopClient {
     origin_source: Option<String>,
     #[serde(default = "default_protocol_system")]
     protocol_system: String,
+    #[serde(default)]
+    component_layout: ComponentLayout,
 }
 
 fn default_protocol_system() -> String {
@@ -125,7 +127,22 @@ impl BebopClient {
             origin_target,
             origin_source,
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            component_layout: ComponentLayout::PerPair,
         })
+    }
+
+    pub(crate) fn with_component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
+    }
+
+    /// The name the client's stream tags its messages with. The two layouts use different names,
+    /// so one stream builder can carry a client of each.
+    fn stream_name(&self) -> &'static str {
+        match self.component_layout {
+            ComponentLayout::PerPair => "bebop",
+            ComponentLayout::PerChain => "bebop_per_chain",
+        }
     }
 
     fn create_component_with_state(
@@ -245,6 +262,55 @@ impl BebopClient {
             new_components.insert(component_id, component_with_state);
         }
         new_components
+    }
+
+    /// The id of the per-chain component.
+    pub fn component_id(&self) -> String {
+        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
+    }
+
+    /// The venue component for one pricing update: every book in `priced_books` that has bids or
+    /// asks. `None` when there is none. A book's bids serve its base token in, its asks its quote
+    /// token in.
+    fn venue_component(
+        &self,
+        update: &BebopPricingUpdate,
+    ) -> Result<Option<ComponentWithState>, RFQError> {
+        let mut books = Vec::new();
+        let mut tvl = 0.0;
+        for (price_data, book_tvl) in self.priced_books(update) {
+            if price_data.bids.is_empty() && price_data.asks.is_empty() {
+                continue;
+            }
+            tvl += book_tvl;
+            books.push(price_data.clone());
+        }
+        if books.is_empty() {
+            return Ok(None);
+        }
+        books.sort_by(|a, b| (&a.base, &a.quote).cmp(&(&b.base, &b.quote)));
+
+        let mut swap_directions = BTreeSet::new();
+        for book in &books {
+            let base = Bytes::from(book.base.clone());
+            let quote = Bytes::from(book.quote.clone());
+            if !book.bids.is_empty() {
+                swap_directions.insert((base.clone(), quote.clone()));
+            }
+            if !book.asks.is_empty() {
+                swap_directions.insert((quote, base));
+            }
+        }
+        let component = component::venue_component(
+            Self::PROTOCOL_SYSTEM,
+            "bebop_pool",
+            self.chain,
+            &swap_directions,
+            &books,
+            tvl,
+            QuoteRule::OncePerVenue,
+        )?;
+        Ok(Some(component))
     }
 
     fn process_quote_response(
@@ -407,10 +473,22 @@ impl RFQClient for BebopClient {
                                     // connection works, so only pricing data clears the counter.
                                     consecutive_failures = 0;
 
-                                    let components = client.pair_components(&protobuf_update);
+                                    let components = match client.component_layout {
+                                        ComponentLayout::PerPair => client.pair_components(&protobuf_update),
+                                        ComponentLayout::PerChain => match client.venue_component(&protobuf_update) {
+                                            Ok(component) => component
+                                                .into_iter()
+                                                .map(|component| (component.component.id.clone(), component))
+                                                .collect(),
+                                            Err(e) => {
+                                                error!("Failed to build the Bebop component: {}", e);
+                                                continue;
+                                            }
+                                        },
+                                    };
                                     let timestamp = component::unix_timestamp()?;
                                     let msg = component::poll_message(&mut current_components, components, timestamp);
-                                    yield Ok(("bebop".to_string(), msg));
+                                    yield Ok((client.stream_name().to_string(), msg));
                                 },
                                 Err(e) => {
                                     error!("Failed to parse protobuf message: {}", e);
@@ -579,12 +657,17 @@ mod tests {
 
     use dotenv::dotenv;
     use futures::SinkExt;
+    use rstest::rstest;
     use tokio::{net::TcpListener, time::timeout};
     use tokio_tungstenite::accept_async;
 
     use super::*;
     use crate::rfq::{
-        constants::get_bebop_auth, protocols::bebop::client_builder::BebopClientBuilder,
+        constants::get_bebop_auth,
+        protocols::{
+            bebop::client_builder::BebopClientBuilder,
+            component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
+        },
     };
 
     /// BebopSettlement.swapSingle
@@ -620,9 +703,12 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::per_pair(ComponentLayout::PerPair)]
+    #[case::per_chain(ComponentLayout::PerChain)]
     #[tokio::test]
     #[ignore] // Requires network access and setting proper env vars
-    async fn test_bebop_websocket_connection() {
+    async fn test_bebop_websocket_connection(#[case] layout: ComponentLayout) {
         // We test with quote tokens that are not USDC in order to ensure our normalization works
         // fine
         let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
@@ -648,7 +734,8 @@ mod tests {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .with_component_layout(layout);
 
         let mut stream = client.stream();
 
@@ -665,17 +752,21 @@ mod tests {
                     Ok((component_id, msg)) => {
                         println!("Received message with ID: {component_id}");
 
-                        assert!(!component_id.is_empty());
-                        assert_eq!(component_id, "bebop");
+                        assert_eq!(component_id, client.stream_name());
                         assert!(msg.header.timestamp > 0);
-                        assert!(!msg.snapshots.states.is_empty());
 
                         let snapshot = &msg.snapshots;
-
-                        // We got at least one component
-                        assert!(!snapshot.states.is_empty());
-
                         println!("Received {} components in this message", snapshot.states.len());
+                        match layout {
+                            ComponentLayout::PerPair => assert!(!snapshot.states.is_empty()),
+                            ComponentLayout::PerChain => {
+                                assert_eq!(
+                                    snapshot.states.len(),
+                                    1,
+                                    "one venue component per chain"
+                                )
+                            }
+                        }
                         for (id, component_with_state) in &snapshot.states {
                             assert_eq!(
                                 component_with_state
@@ -683,22 +774,27 @@ mod tests {
                                     .protocol_system,
                                 "rfq:bebop"
                             );
-                            assert_eq!(
-                                component_with_state
-                                    .component
-                                    .protocol_type_name,
-                                "bebop_pool"
-                            );
                             assert_eq!(component_with_state.component.chain, Chain::Ethereum);
-
                             let attributes = &component_with_state.state.attributes;
-
-                            // Check that bids and asks exist and have non-empty byte strings
-                            assert!(attributes.contains_key("bids"));
-                            assert!(attributes.contains_key("asks"));
-                            assert!(!attributes["bids"].is_empty());
-                            assert!(!attributes["asks"].is_empty());
-
+                            match layout {
+                                ComponentLayout::PerPair => {
+                                    assert!(
+                                        attributes.contains_key("bids") ||
+                                            attributes.contains_key("asks")
+                                    );
+                                }
+                                ComponentLayout::PerChain => {
+                                    assert_eq!(id, &client.component_id());
+                                    let books: Vec<BebopPriceData> =
+                                        serde_json::from_slice(&attributes[BOOKS_ATTRIBUTE])
+                                            .unwrap();
+                                    assert!(!books.is_empty());
+                                    let directions = &component_with_state
+                                        .component
+                                        .static_attributes[SWAP_DIRECTIONS_ATTRIBUTE];
+                                    assert_eq!(directions.len() % 40, 0);
+                                }
+                            }
                             if let Some(tvl) = component_with_state.component_tvl {
                                 assert!(tvl >= 0.0);
                                 println!("Component {id} TVL: ${tvl:.2}");
@@ -818,6 +914,7 @@ mod tests {
             origin_target: None,
             origin_source: None,
             protocol_system: BebopClient::PROTOCOL_SYSTEM.to_string(),
+            component_layout: ComponentLayout::PerPair,
         };
 
         let start_time = std::time::Instant::now();
@@ -1172,6 +1269,7 @@ mod tests {
             origin_target: None,
             origin_source: None,
             protocol_system: BebopClient::PROTOCOL_SYSTEM.to_string(),
+            component_layout: ComponentLayout::PerPair,
         }
     }
 
@@ -1188,6 +1286,151 @@ mod tests {
             sender: router.clone(),
             receiver: router,
         }
+    }
+
+    fn price_data(base: &Bytes, quote: &Bytes, bids: &[f32], asks: &[f32]) -> BebopPriceData {
+        BebopPriceData {
+            base: base.to_vec(),
+            quote: quote.to_vec(),
+            last_update_ts: 1,
+            bids: bids.to_vec(),
+            asks: asks.to_vec(),
+        }
+    }
+
+    /// WETH and WBTC quoted against USDC, with USDC as the TVL quote token.
+    fn venue_test_client() -> (BebopClient, Bytes, Bytes, Bytes) {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let mut client =
+            create_test_bebop_client("http://unused/quote".to_string(), Duration::from_secs(1));
+        client.tokens = HashSet::from([weth.clone(), wbtc.clone(), usdc.clone()]);
+        client.quote_tokens = HashSet::from([usdc.clone()]);
+        client.tvl = 100.0;
+        (client, weth, wbtc, usdc)
+    }
+
+    #[test]
+    fn test_venue_component_keeps_books_above_tvl_threshold() {
+        let (client, weth, wbtc, usdc) = venue_test_client();
+        let update = BebopPricingUpdate {
+            pairs: vec![
+                price_data(&weth, &usdc, &[3000.0, 1.0], &[]),
+                price_data(&wbtc, &usdc, &[65.0, 0.001], &[65.0, 0.001]),
+            ],
+        };
+
+        let component = client
+            .venue_component(&update)
+            .unwrap()
+            .expect("the WETH book clears the threshold");
+
+        assert_eq!(component.component.id, client.component_id());
+        // Bid TVL 3000, ask TVL 0, averaged. The WBTC book is below the threshold.
+        assert_eq!(component.component_tvl, Some(1500.0));
+        let mut expected_tokens = vec![weth.clone(), usdc.clone()];
+        expected_tokens.sort();
+        assert_eq!(component.component.tokens, expected_tokens);
+        let mut expected_directions = weth.to_vec();
+        expected_directions.extend_from_slice(&usdc);
+        assert_eq!(
+            component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].to_vec(),
+            expected_directions,
+            "bids only, so WETH in and USDC out is the one direction"
+        );
+        assert_eq!(
+            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
+            b"once_per_venue"
+        );
+        let books: Vec<BebopPriceData> =
+            serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].base, weth.to_vec());
+    }
+
+    #[test]
+    fn test_venue_component_asks_quote_the_reverse_direction() {
+        let (client, weth, _, usdc) = venue_test_client();
+        let update =
+            BebopPricingUpdate { pairs: vec![price_data(&weth, &usdc, &[], &[3000.0, 1.0])] };
+
+        let component = client
+            .venue_component(&update)
+            .unwrap()
+            .unwrap();
+
+        let mut expected_directions = usdc.to_vec();
+        expected_directions.extend_from_slice(&weth);
+        assert_eq!(
+            component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].to_vec(),
+            expected_directions
+        );
+    }
+
+    #[test]
+    fn test_venue_component_converts_tvl_through_approved_quote_token() {
+        let (client, weth, wbtc, usdc) = venue_test_client();
+        let update = BebopPricingUpdate {
+            pairs: vec![
+                price_data(&weth, &wbtc, &[0.05, 1.0], &[]),
+                price_data(&wbtc, &usdc, &[65000.0, 1.0], &[65000.0, 1.0]),
+            ],
+        };
+
+        let component = client
+            .venue_component(&update)
+            .unwrap()
+            .unwrap();
+
+        // TVL only: the WBTC/USDC book converts the WETH/WBTC book's WBTC value to USDC.
+        // WETH/WBTC: 0.025 WBTC, worth 1625 USDC. WBTC/USDC: 65000 USDC.
+        let tvl = component.component_tvl.unwrap();
+        assert!((tvl - 66625.0).abs() < 1e-3, "{tvl}");
+        let books: Vec<BebopPriceData> =
+            serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
+        assert_eq!(books.len(), 2);
+    }
+
+    #[test]
+    fn test_venue_component_drops_book_without_tvl_conversion() {
+        let (client, weth, wbtc, _) = venue_test_client();
+        let update =
+            BebopPricingUpdate { pairs: vec![price_data(&weth, &wbtc, &[0.05, 1.0], &[])] };
+        assert!(client
+            .venue_component(&update)
+            .unwrap()
+            .is_none());
+    }
+
+    /// Each component carries the id and attributes the per-pair state decodes.
+    #[test]
+    fn test_pair_components_keep_pairs_above_tvl_threshold() {
+        let (client, weth, wbtc, usdc) = venue_test_client();
+        let update = BebopPricingUpdate {
+            pairs: vec![
+                price_data(&weth, &usdc, &[3000.0, 1.0], &[3001.0, 1.0]),
+                price_data(&wbtc, &usdc, &[65.0, 0.001], &[]),
+            ],
+        };
+
+        let components = client.pair_components(&update);
+
+        let pair_str = format!("bebop_{}/{}", hex::encode(&weth), hex::encode(&usdc));
+        let id = keccak256(pair_str.as_bytes()).to_string();
+        assert_eq!(
+            components.keys().collect::<Vec<_>>(),
+            [&id],
+            "the WBTC pair is below the threshold"
+        );
+        let component = &components[&id];
+        assert_eq!(component.component.tokens, vec![weth, usdc]);
+        assert_eq!(component.state.attributes["bids"].as_ref(), b"[[3000.0,1.0]]");
+        assert_eq!(component.state.attributes["asks"].as_ref(), b"[[3001.0,1.0]]");
+        assert!(component
+            .component
+            .static_attributes
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1341,6 +1584,7 @@ mod tests {
             ),
             origin_source: Some("tycho".to_string()),
             protocol_system: BebopClient::PROTOCOL_SYSTEM.to_string(),
+            component_layout: ComponentLayout::PerChain,
         };
 
         let serialized = serde_json::to_string(&original).unwrap();
