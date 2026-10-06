@@ -28,12 +28,15 @@ use crate::{
         client::RFQClient,
         errors::RFQError,
         models::TimestampHeader,
-        protocols::liquorice::models::{
-            LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
-            LiquoriceTokenPairPrice,
+        protocols::{
+            component,
+            liquorice::models::{
+                LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
+                LiquoriceTokenPairPrice,
+            },
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
+    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
     tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
@@ -190,6 +193,87 @@ impl LiquoriceClient {
             component_tvl: Some(tvl),
             entrypoints: vec![],
         }
+    }
+
+    /// Every market maker's prices on a pair whose tokens the client requested and whose TVL
+    /// clears the threshold, each with its normalized TVL.
+    fn priced_levels<'a>(
+        &self,
+        prices_by_mm: &'a HashMap<String, Vec<LiquoriceTokenPairPrice>>,
+    ) -> Result<Vec<(&'a str, &'a LiquoriceTokenPairPrice, f64)>, RFQError> {
+        let mut priced = Vec::new();
+        for (mm_name, token_pair_prices) in prices_by_mm.iter() {
+            for token_pair_price in token_pair_prices {
+                let base_token = &token_pair_price.base_token;
+                let quote_token = &token_pair_price.quote_token;
+
+                if !self.tokens.contains(base_token) || !self.tokens.contains(quote_token) {
+                    continue;
+                }
+
+                let normalized_tvl = self.normalize_tvl(
+                    token_pair_price.calculate_tvl(),
+                    token_pair_price.quote_token.clone(),
+                    prices_by_mm,
+                )?;
+
+                if normalized_tvl < self.tvl {
+                    info!(
+                        "Filtering out MM {} for pair {}/{} due to low TVL: {:.2} < {:.2}",
+                        mm_name,
+                        hex::encode(base_token),
+                        hex::encode(quote_token),
+                        normalized_tvl,
+                        self.tvl
+                    );
+                    continue;
+                }
+                priced.push((mm_name.as_str(), token_pair_price, normalized_tvl));
+            }
+        }
+        Ok(priced)
+    }
+
+    /// One component per pair in `priced_levels`, holding every market maker on the pair. The
+    /// component's TVL is the largest maker's.
+    fn pair_components(
+        &self,
+        prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
+    ) -> Result<HashMap<String, ComponentWithState>, RFQError> {
+        struct PricesWithTvl {
+            // MM name -> price levels for the token pair
+            mm_prices: HashMap<String, LiquoriceTokenPairPrice>,
+            // The highest TVL among MMs for this token pair, used as the component's TVL
+            tvl: f64,
+        }
+        let mut pair_mm_prices: HashMap<(Bytes, Bytes), PricesWithTvl> = HashMap::new();
+        for (mm_name, token_pair_price, normalized_tvl) in self.priced_levels(prices_by_mm)? {
+            let entry = pair_mm_prices
+                .entry((token_pair_price.base_token.clone(), token_pair_price.quote_token.clone()))
+                .or_insert_with(|| PricesWithTvl {
+                    mm_prices: HashMap::new(),
+                    tvl: f64::NEG_INFINITY,
+                });
+            entry.tvl = entry.tvl.max(normalized_tvl);
+            entry
+                .mm_prices
+                .insert(mm_name.to_string(), token_pair_price.clone());
+        }
+
+        let mut new_components = HashMap::new();
+        for ((base_token, quote_token), PricesWithTvl { mm_prices, tvl }) in pair_mm_prices {
+            let pair_str =
+                format!("liquorice_{}/{}", hex::encode(&base_token), hex::encode(&quote_token));
+            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
+            let component_with_state = self.create_component_with_state(
+                component_id.clone(),
+                vec![base_token, quote_token],
+                &mm_prices,
+                tvl,
+            );
+            new_components.insert(component_id, component_with_state);
+        }
+        Ok(new_components)
     }
 
     fn process_quote_response(
@@ -354,89 +438,9 @@ impl RFQClient for LiquoriceClient {
 
                 match client.fetch_price_levels().await {
                     Ok(prices_by_mm) => {
-                        let mut new_components = HashMap::new();
-
-                        // Group qualifying MMs by token pair
-                        struct PricesWithTvl {
-                            // MM name -> price levels for the token pair
-                            mm_prices: HashMap<String, LiquoriceTokenPairPrice>,
-                            // The highest TVL among MMs for this token pair, used as the component's TVL
-                            tvl: f64,
-                        }
-                        let mut pair_mm_prices: HashMap<(Bytes, Bytes), PricesWithTvl> = HashMap::new();
-
-                        info!("Fetched price levels from {} market makers", prices_by_mm.len());
-                        for (mm_name, token_pair_prices) in prices_by_mm.iter() {
-                            for token_pair_price in token_pair_prices {
-                                let base_token = &token_pair_price.base_token;
-                                let quote_token = &token_pair_price.quote_token;
-
-                                if !client.tokens.contains(base_token) || !client.tokens.contains(quote_token) {
-                                    continue;
-                                }
-
-                                let tvl = token_pair_price.calculate_tvl();
-                                let normalized_tvl = client.normalize_tvl(
-                                    tvl,
-                                    token_pair_price.quote_token.clone(),
-                                    &prices_by_mm,
-                                )?;
-
-                                if normalized_tvl < client.tvl {
-                                    info!("Filtering out MM {} for pair {}/{} due to low TVL: {:.2} < {:.2}",
-                                          mm_name, hex::encode(base_token), hex::encode(quote_token),
-                                          normalized_tvl, client.tvl);
-                                    continue;
-                                }
-
-                                let entry = pair_mm_prices
-                                    .entry((base_token.clone(), quote_token.clone()))
-                                    .or_insert_with(|| PricesWithTvl { mm_prices: HashMap::new(), tvl: f64::NEG_INFINITY });
-                                entry.tvl = entry.tvl.max(normalized_tvl);
-                                entry.mm_prices.insert(mm_name.clone(), token_pair_price.clone());
-                            }
-                        }
-
-                        for ((base_token, quote_token), PricesWithTvl { mm_prices, tvl: component_tvl }) in pair_mm_prices {
-                            let pair_str = format!("liquorice_{}/{}", hex::encode(&base_token), hex::encode(&quote_token));
-                            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-
-                            let tokens = vec![base_token, quote_token];
-
-                            let component_with_state = client.create_component_with_state(
-                                component_id.clone(),
-                                tokens,
-                                &mm_prices,
-                                component_tvl,
-                            );
-                            new_components.insert(component_id, component_with_state);
-                        }
-
-                        let removed_components: HashMap<String, ProtocolComponent> = current_components
-                            .iter()
-                            .filter(|&(id, _)| !new_components.contains_key(id))
-                            .map(|(k, v)| (k.clone(), v.component.clone()))
-                            .collect();
-
-                        current_components = new_components.clone();
-
-                        let snapshot = Snapshot {
-                            states: new_components,
-                            vm_storage: HashMap::new(),
-                        };
-                        let timestamp = SystemTime::now().duration_since(
-                            SystemTime::UNIX_EPOCH
-                        ).map_err(
-                            |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
-                        )?.as_secs();
-
-                        let msg = StateSyncMessage::<TimestampHeader> {
-                            header: TimestampHeader { timestamp },
-                            snapshots: snapshot,
-                            deltas: None,
-                            removed_components,
-                        };
-
+                        let components = client.pair_components(&prices_by_mm)?;
+                        let timestamp = component::unix_timestamp()?;
+                        let msg = component::poll_message(&mut current_components, components, timestamp);
                         yield Ok(("liquorice".to_string(), msg));
                     },
                     Err(e) => {

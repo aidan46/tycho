@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
-    time::SystemTime,
 };
 
 use alloy::primitives::{utils::keccak256, Address, U256};
@@ -24,12 +23,16 @@ use crate::{
         client::RFQClient,
         errors::RFQError,
         models::TimestampHeader,
-        protocols::hashflow::models::{
-            HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
-            HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse, HashflowRFQ,
+        protocols::{
+            component,
+            hashflow::models::{
+                HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
+                HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse,
+                HashflowRFQ,
+            },
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
+    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
     tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
@@ -165,6 +168,62 @@ impl HashflowClient {
         }
     }
 
+    /// Every market maker's levels on a pair whose tokens the client requested and whose TVL
+    /// clears the threshold, each with its normalized TVL.
+    fn priced_levels<'a>(
+        &self,
+        levels_by_mm: &'a HashMap<String, Vec<HashflowMarketMakerLevels>>,
+    ) -> Result<Vec<(&'a str, &'a HashflowMarketMakerLevels, f64)>, RFQError> {
+        let mut priced = Vec::new();
+        for (mm_name, mm_levels) in levels_by_mm.iter() {
+            for mm_level in mm_levels {
+                let base_token = &mm_level.pair.base_token;
+                let quote_token = &mm_level.pair.quote_token;
+                if !(self.tokens.contains(base_token) && self.tokens.contains(quote_token)) {
+                    continue;
+                }
+                let normalized_tvl = self.normalize_tvl(
+                    mm_level.calculate_tvl(),
+                    mm_level.pair.quote_token.clone(),
+                    levels_by_mm,
+                )?;
+                if normalized_tvl < self.tvl {
+                    info!(
+                        "Filtering out component {} due to low TVL: {:.2} < {:.2}",
+                        pair_component_id(mm_level),
+                        normalized_tvl,
+                        self.tvl
+                    );
+                    continue;
+                }
+                priced.push((mm_name.as_str(), mm_level, normalized_tvl));
+            }
+        }
+        Ok(priced)
+    }
+
+    /// One component per pair in `priced_levels`. When several market makers quote a pair, the
+    /// component holds one of them.
+    fn pair_components(
+        &self,
+        levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
+    ) -> Result<HashMap<String, ComponentWithState>, RFQError> {
+        let mut new_components = HashMap::new();
+        for (mm_name, mm_level, tvl) in self.priced_levels(levels_by_mm)? {
+            let component_id = pair_component_id(mm_level);
+            let tokens = vec![mm_level.pair.base_token.clone(), mm_level.pair.quote_token.clone()];
+            let component_with_state = self.create_component_with_state(
+                component_id.clone(),
+                tokens,
+                mm_name,
+                mm_level,
+                tvl,
+            );
+            new_components.insert(component_id, component_with_state);
+        }
+        Ok(new_components)
+    }
+
     async fn fetch_market_makers(&mut self) -> Result<Vec<String>, RFQError> {
         let query_params = vec![
             ("source", self.auth_user.clone()),
@@ -263,6 +322,16 @@ impl HashflowClient {
     }
 }
 
+/// The id of the per-pair component of `mm_level`'s pair.
+fn pair_component_id(mm_level: &HashflowMarketMakerLevels) -> String {
+    let pair_str = format!(
+        "hashflow_{}/{}",
+        hex::encode(&mm_level.pair.base_token),
+        hex::encode(&mm_level.pair.quote_token)
+    );
+    format!("{}", keccak256(pair_str.as_bytes()))
+}
+
 #[async_trait]
 impl RFQClient for HashflowClient {
     fn stream(
@@ -294,76 +363,9 @@ impl RFQClient for HashflowClient {
 
                 match client.fetch_price_levels(&market_makers).await {
                     Ok(levels_by_mm) => {
-                        let mut new_components = HashMap::new();
-
-                        info!("Fetched price levels from {} market makers", levels_by_mm.len());
-                        // Process all market maker levels
-                        for (mm_name, mm_levels) in levels_by_mm.iter() {
-                            for mm_level in mm_levels {
-                                let base_token = &mm_level.pair.base_token;
-                                let quote_token = &mm_level.pair.quote_token;
-
-                                // Check if both tokens are in our tokens set
-                                if client.tokens.contains(base_token) && client.tokens.contains(quote_token) {
-                                    let tokens = vec![base_token.clone(), quote_token.clone()];
-                                    let tvl = mm_level.calculate_tvl();
-
-                                    // Apply TVL normalization if needed
-                                    let normalized_tvl = client.normalize_tvl(
-                                        tvl,
-                                        mm_level.pair.quote_token.clone(),
-                                        &levels_by_mm,
-                                    )?;
-
-                                    // Hash the pair for component id
-                                    let pair_str = format!("hashflow_{}/{}", hex::encode(base_token), hex::encode(quote_token));
-                                    let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-
-                                    if normalized_tvl < client.tvl {
-                                        info!("Filtering out component {} due to low TVL: {:.2} < {:.2}",
-                                              component_id, normalized_tvl, client.tvl);
-                                        continue;
-                                    }
-
-                                    let component_with_state = client.create_component_with_state(
-                                        component_id.clone(),
-                                        tokens,
-                                        mm_name,
-                                        mm_level,
-                                        normalized_tvl
-                                    );
-                                    new_components.insert(component_id, component_with_state);
-                                }
-                            }
-                        }
-
-                        // Find components that were removed
-                        let removed_components: HashMap<String, ProtocolComponent> = current_components
-                            .iter()
-                            .filter(|&(id, _)| !new_components.contains_key(id))
-                            .map(|(k, v)| (k.clone(), v.component.clone()))
-                            .collect();
-
-                        // Update current state
-                        current_components = new_components.clone();
-
-                        let snapshot = Snapshot {
-                            states: new_components,
-                            vm_storage: HashMap::new(),
-                        };
-                        let timestamp = SystemTime::now().duration_since(
-                            SystemTime::UNIX_EPOCH
-                        ).map_err(
-                            |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
-                        )?.as_secs();
-
-                        let msg = StateSyncMessage::<TimestampHeader> {
-                            header: TimestampHeader { timestamp },
-                            snapshots: snapshot,
-                            deltas: None,
-                            removed_components,
-                        };
-
+                        let components = client.pair_components(&levels_by_mm)?;
+                        let timestamp = component::unix_timestamp()?;
+                        let msg = component::poll_message(&mut current_components, components, timestamp);
                         yield Ok(("hashflow".to_string(), msg));
                     },
                     Err(e) => {

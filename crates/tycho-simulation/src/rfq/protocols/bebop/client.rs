@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
-    time::SystemTime,
 };
 
 use alloy::primitives::{utils::keccak256, Address};
@@ -29,11 +28,14 @@ use crate::{
         client::RFQClient,
         errors::RFQError,
         models::TimestampHeader,
-        protocols::bebop::models::{
-            BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse,
+        protocols::{
+            bebop::models::{
+                BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse,
+            },
+            component,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
+    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
     tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
@@ -182,6 +184,69 @@ impl BebopClient {
         }
     }
 
+    /// Every book whose tokens the client requested and whose TVL clears the threshold, with its
+    /// TVL. A quote token outside the approved set is priced through a pair that holds one of
+    /// them, so every book's TVL is in the same unit.
+    fn priced_books<'a>(&self, update: &'a BebopPricingUpdate) -> Vec<(&'a BebopPriceData, f64)> {
+        let mut priced = Vec::new();
+        for price_data in &update.pairs {
+            let base_bytes = Bytes::from(price_data.base.clone());
+            let quote_bytes = Bytes::from(price_data.quote.clone());
+            if !(self.tokens.contains(&base_bytes) && self.tokens.contains(&quote_bytes)) {
+                continue;
+            }
+
+            let mut quote_price_data: Option<&BebopPriceData> = None;
+            if !self.quote_tokens.contains(&quote_bytes) {
+                for approved_quote_token in &self.quote_tokens {
+                    // Either QUOTE/APPROVED or APPROVED/QUOTE
+                    if let Some(quote_data) =
+                        update.pairs.iter().find(|p| {
+                            (p.base == quote_bytes.as_ref() &&
+                                p.quote == approved_quote_token.as_ref()) ||
+                                (p.quote == quote_bytes.as_ref() &&
+                                    p.base == approved_quote_token.as_ref())
+                        })
+                    {
+                        quote_price_data = Some(quote_data);
+                        break;
+                    }
+                }
+                if quote_price_data.is_none() {
+                    warn!("Quote token {} does not have price levels in approved quote token. Skipping.", hex::encode(&quote_bytes));
+                    continue;
+                }
+            }
+
+            let tvl = price_data.calculate_tvl(quote_price_data);
+            if tvl < self.tvl {
+                continue;
+            }
+            priced.push((price_data, tvl));
+        }
+        priced
+    }
+
+    /// One component per book in `priced_books`.
+    fn pair_components(&self, update: &BebopPricingUpdate) -> HashMap<String, ComponentWithState> {
+        let mut new_components = HashMap::new();
+        for (price_data, tvl) in self.priced_books(update) {
+            let base_bytes = Bytes::from(price_data.base.clone());
+            let quote_bytes = Bytes::from(price_data.quote.clone());
+            let pair_str =
+                format!("bebop_{}/{}", hex::encode(&base_bytes), hex::encode(&quote_bytes));
+            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
+            let component_with_state = self.create_component_with_state(
+                component_id.clone(),
+                vec![base_bytes, quote_bytes],
+                price_data,
+                tvl,
+            );
+            new_components.insert(component_id, component_with_state);
+        }
+        new_components
+    }
+
     fn process_quote_response(
         quote_response: BebopQuoteResponse,
         params: &GetAmountOutParams,
@@ -286,9 +351,7 @@ impl RFQClient for BebopClient {
     fn stream(
         &self,
     ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
-        let tokens = self.tokens.clone();
         let url = self.price_ws.clone();
-        let tvl_threshold = self.tvl;
         let authorization = format!("Bearer {}", self.ws_key);
         let client = self.clone();
 
@@ -344,89 +407,9 @@ impl RFQClient for BebopClient {
                                     // connection works, so only pricing data clears the counter.
                                     consecutive_failures = 0;
 
-                                    let mut new_components = HashMap::new();
-
-                                    // Process all pairs directly from protobuf
-                                    for price_data in &protobuf_update.pairs {
-                                        let base_bytes = Bytes::from(price_data.base.clone());
-                                        let quote_bytes = Bytes::from(price_data.quote.clone());
-                                        if tokens.contains(&base_bytes) && tokens.contains(&quote_bytes) {
-                                            let pair_tokens = vec![
-                                                base_bytes.clone(), quote_bytes.clone()
-                                            ];
-
-                                            let mut quote_price_data: Option<&BebopPriceData> = None;
-                                            // The quote token is not one of the approved quote tokens
-                                            // Get the price, so we can normalize our TVL calculation
-                                            if !client.quote_tokens.contains(&quote_bytes) {
-                                                for approved_quote_token in &client.quote_tokens {
-                                                    // Look for a pair containing both our quote token and an approved token
-                                                    // Can be either QUOTE/APPROVED or APPROVED/QUOTE
-                                                    if let Some(quote_data) = protobuf_update.pairs.iter()
-                                                        .find(|p| {
-                                                            (p.base == quote_bytes.as_ref() && p.quote == approved_quote_token.as_ref()) ||
-                                                            (p.quote == quote_bytes.as_ref() && p.base == approved_quote_token.as_ref())
-                                                        }) {
-                                                        quote_price_data = Some(quote_data);
-                                                        break;
-                                                    }
-                                                }
-
-                                                // Quote token doesn't have price levels in approved quote tokens.
-                                                // Skip.
-                                                if quote_price_data.is_none() {
-                                                    warn!("Quote token {} does not have price levels in approved quote token. Skipping.", hex::encode(&quote_bytes));
-                                                    continue;
-                                                }
-                                            }
-
-                                            let tvl = price_data.calculate_tvl(quote_price_data);
-                                            if tvl < tvl_threshold {
-                                                continue;
-                                            }
-
-                                            let pair_str = format!("bebop_{}/{}", hex::encode(&base_bytes), hex::encode(&quote_bytes));
-                                            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-                                            let component_with_state = client.create_component_with_state(
-                                                component_id.clone(),
-                                                pair_tokens,
-                                                price_data,
-                                                tvl
-                                            );
-                                            new_components.insert(component_id, component_with_state);
-                                        }
-                                    }
-
-                                    // Find components that were removed (existed before but not in this update)
-                                    // This includes components with no bids or asks, since they are filtered
-                                    // out by the tvl threshold.
-                                    let removed_components: HashMap<String, ProtocolComponent> = current_components
-                                        .iter()
-                                        .filter(|&(id, _)| !new_components.contains_key(id))
-                                        .map(|(k, v)| (k.clone(), v.component.clone()))
-                                        .collect();
-
-                                    // Update our current state
-                                    current_components = new_components.clone();
-
-                                    let snapshot = Snapshot {
-                                        states: new_components,
-                                        vm_storage: HashMap::new(),
-                                    };
-                                    let timestamp = SystemTime::now().duration_since(
-                                        SystemTime::UNIX_EPOCH
-                                    ).map_err(
-                                        |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
-                                    )?.as_secs();
-
-                                    let msg = StateSyncMessage::<TimestampHeader> {
-                                        header: TimestampHeader { timestamp },
-                                        snapshots: snapshot,
-                                        deltas: None, // Deltas are always None - all the changes are absolute
-                                        removed_components,
-                                    };
-
-                                    // Yield one message containing all updated pairs
+                                    let components = client.pair_components(&protobuf_update);
+                                    let timestamp = component::unix_timestamp()?;
+                                    let msg = component::poll_message(&mut current_components, components, timestamp);
                                     yield Ok(("bebop".to_string(), msg));
                                 },
                                 Err(e) => {

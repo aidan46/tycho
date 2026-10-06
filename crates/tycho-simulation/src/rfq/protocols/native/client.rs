@@ -26,13 +26,14 @@ use crate::{
         errors::RFQError,
         models::TimestampHeader,
         protocols::{
+            component,
             native::models::{
                 FirmQuoteRequest, FirmQuoteResponse, NativeApiErrorResponse, NativeSupportedChain,
             },
             utils::bytes_to_address,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
+    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
     tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
@@ -214,6 +215,82 @@ impl NativeClient {
             component_tvl: Some(tvl),
             entrypoints: vec![],
         }
+    }
+
+    /// Every grouped book whose tokens the client requested and whose TVL clears the threshold,
+    /// each with its id and TVL. Books of unrequested tokens still serve TVL conversion.
+    fn priced_books<'a>(
+        &self,
+        books: &'a HashMap<String, NativePriceData>,
+    ) -> Vec<(&'a str, &'a NativePriceData, f64)> {
+        let mut priced = Vec::new();
+
+        for (component_id, book) in books {
+            // Keep unrequested books available for TVL conversion, but only emit requested
+            // markets as components.
+            if !self.tokens.contains(&book.base_address) ||
+                !self
+                    .tokens
+                    .contains(&book.quote_address)
+            {
+                continue;
+            }
+
+            let quote_price_data = if self
+                .quote_tokens
+                .contains(&book.quote_address)
+            {
+                None
+            } else {
+                // TVL thresholds are applied in approved quote-token units. If Native quotes this
+                // market against another token, normalize through the most liquid available
+                // approved quote-token market before filtering.
+                self.select_tvl_conversion_book(&book.quote_address, books)
+            };
+
+            if !self
+                .quote_tokens
+                .contains(&book.quote_address) &&
+                quote_price_data.is_none()
+            {
+                continue;
+            }
+
+            let Some(incoming_tvl) = book.calculate_tvl(quote_price_data) else {
+                warn!("Skipping Native Relay market {component_id} because its TVL is unavailable or non-finite");
+                continue;
+            };
+
+            if incoming_tvl < self.tvl {
+                info!(
+                    "Filtering out Native Relay market {} due to low TVL: {:.2} < {:.2}",
+                    component_id, incoming_tvl, self.tvl
+                );
+                continue;
+            }
+
+            priced.push((component_id.as_str(), book, incoming_tvl));
+        }
+        priced
+    }
+
+    /// One component per book in `priced_books`.
+    fn pair_components(
+        &self,
+        books: &HashMap<String, NativePriceData>,
+    ) -> HashMap<String, ComponentWithState> {
+        let mut new_components = HashMap::new();
+        for (component_id, book, tvl) in self.priced_books(books) {
+            let tokens = vec![book.base_address.clone(), book.quote_address.clone()];
+            let component_with_state = self.create_component_with_state(
+                component_id.to_string(),
+                tokens,
+                book.clone(),
+                tvl,
+            );
+            new_components.insert(component_id.to_string(), component_with_state);
+        }
+        new_components
     }
 
     async fn fetch_orderbook(&self) -> Result<Vec<NativeOrderbookEntry>, RFQError> {
@@ -681,81 +758,9 @@ impl RFQClient for NativeClient {
                     }
                 };
 
-                let mut new_components = HashMap::new();
-
-                for (component_id, book) in &books {
-                    // Keep unrequested books available for TVL conversion, but only emit requested
-                    // markets as components.
-                    if !client.tokens.contains(&book.base_address) ||
-                        !client.tokens.contains(&book.quote_address)
-                    {
-                        continue;
-                    }
-
-                    let quote_price_data = if client.quote_tokens.contains(&book.quote_address) {
-                        None
-                    } else {
-                        // TVL thresholds are applied in approved quote-token units. If Native
-                        // quotes this market against another token, normalize through the most
-                        // liquid available approved quote-token market before filtering.
-                        client.select_tvl_conversion_book(&book.quote_address, &books)
-                    };
-
-                    if !client.quote_tokens.contains(&book.quote_address) &&
-                        quote_price_data.is_none()
-                    {
-                        continue;
-                    }
-
-                    let Some(incoming_tvl) = book.calculate_tvl(quote_price_data) else {
-                        warn!("Skipping Native Relay market {component_id} because its TVL is unavailable or non-finite");
-                        continue;
-                    };
-
-                    if incoming_tvl < client.tvl {
-                        info!("Filtering out Native Relay market {} due to low TVL: {:.2} < {:.2}", component_id, incoming_tvl, client.tvl);
-                        continue;
-                    }
-
-                    let tokens = vec![book.base_address.clone(), book.quote_address.clone()];
-                    let component_with_state = client.create_component_with_state(
-                        component_id.clone(),
-                        tokens,
-                        book.clone(),
-                        incoming_tvl,
-                    );
-                    new_components.insert(component_id.clone(), component_with_state);
-                }
-
-                // Emit removals for markets that disappeared from the Relay orderbook or no longer
-                // pass token/TVL filtering.
-                let removed_components: HashMap<String, ProtocolComponent> = current_components
-                    .iter()
-                    .filter(|&(id, _)| !new_components.contains_key(id))
-                    .map(|(k, v)| (k.clone(), v.component.clone()))
-                    .collect();
-
-                current_components = new_components.clone();
-
-                let snapshot = Snapshot {
-                    states: new_components,
-                    vm_storage: HashMap::new(),
-                };
-
-                // Native is off-chain and timestamped, not block-based. Downstream decoders use
-                // this wall-clock header to build a normal Tycho state update.
-                let timestamp = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let msg = StateSyncMessage::<TimestampHeader> {
-                    header: TimestampHeader { timestamp },
-                    snapshots: snapshot,
-                    deltas: None,
-                    removed_components,
-                };
-
+                let components = client.pair_components(&books);
+                let timestamp = component::unix_timestamp().unwrap_or_default();
+                let msg = component::poll_message(&mut current_components, components, timestamp);
                 yield Ok(("native".to_string(), msg));
             }
         })
