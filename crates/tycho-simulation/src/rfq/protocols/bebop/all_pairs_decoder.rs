@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{models::token::Token, Bytes};
 
-use super::{models::BebopPriceData, venue_state::BebopVenueState};
+use super::{all_pairs_state::BebopAllPairsState, models::BebopPriceData};
 use crate::{
     protocol::{
         errors::InvalidSnapshotError,
@@ -14,12 +14,12 @@ use crate::{
         models::{ComponentLayout, QuoteRule, TimestampHeader},
         protocols::{
             bebop::client_builder::BebopClientBuilder,
-            component::{decode_venue, DecodedVenue},
+            component::{decode_all_pairs_component, DecodedAllPairs},
         },
     },
 };
 
-impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopVenueState {
+impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopAllPairsState {
     type Error = InvalidSnapshotError;
 
     async fn try_from_with_header(
@@ -29,8 +29,8 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopVenueState {
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let DecodedVenue { books, tokens, quote_rule } =
-            decode_venue::<BebopPriceData>(&snapshot, all_tokens)?;
+        let DecodedAllPairs { books, tokens, quote_rule } =
+            decode_all_pairs_component::<BebopPriceData>(&snapshot, all_tokens)?;
         if quote_rule.is_some_and(|rule| rule != QuoteRule::OncePerVenue) {
             return Err(InvalidSnapshotError::ValueError(
                 "Bebop names no market maker; its quote rule is once_per_venue".into(),
@@ -45,7 +45,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopVenueState {
         })?;
         let mut builder = BebopClientBuilder::new(snapshot.component.chain, auth.key)
             .tokens(tokens.keys().cloned().collect())
-            .component_layout(ComponentLayout::PerChain);
+            .component_layout(ComponentLayout::AllPairs);
         if let Some(origin_address) = origins.address {
             builder = builder.origin_address(origin_address);
         }
@@ -59,7 +59,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopVenueState {
             InvalidSnapshotError::ValueError(format!("Couldn't create BebopClient: {e}"))
         })?;
 
-        BebopVenueState::new(books, tokens, client)
+        BebopAllPairsState::new(books, tokens, client)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))
     }
 }
@@ -71,7 +71,7 @@ mod tests {
     use tycho_common::simulation::protocol_sim::ProtocolSim;
 
     use super::*;
-    use crate::rfq::protocols::test_utils::{decode, usdc, venue_snapshot, wbtc, weth};
+    use crate::rfq::protocols::test_utils::{all_pairs_snapshot, decode, usdc, wbtc, weth};
 
     fn snapshot() -> (ComponentWithState, HashMap<Bytes, Token>) {
         env::set_var("BEBOP_KEY", "test_key");
@@ -91,13 +91,13 @@ mod tests {
                 asks: vec![3100.0, 1.5],
             },
         ];
-        venue_snapshot("rfq:bebop", &[wbtc(), usdc(), weth()], &books)
+        all_pairs_snapshot("rfq:bebop", &[wbtc(), usdc(), weth()], &books)
     }
 
     #[tokio::test]
     async fn test_decodes_books() {
         let (snapshot, tokens) = snapshot();
-        let state = decode::<BebopVenueState>(snapshot, &tokens)
+        let state = decode::<BebopAllPairsState>(snapshot, &tokens)
             .await
             .unwrap();
 
@@ -118,7 +118,7 @@ mod tests {
             .component
             .static_attributes
             .insert(QuoteRule::ATTRIBUTE.to_string(), b"once_per_maker".into());
-        let result = decode::<BebopVenueState>(snapshot, &tokens).await;
+        let result = decode::<BebopAllPairsState>(snapshot, &tokens).await;
         assert!(
             matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(msg) if msg.contains("names no market maker"))
         );

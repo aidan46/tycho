@@ -112,13 +112,9 @@ impl LiquoriceTokenPairPrice {
         }
 
         let (total_quote_token, remaining_base_token) =
-            self.get_amount_out_from_levels(base_token_amount);
+            fill_levels(&self.levels, base_token_amount);
 
         Some(total_quote_token / (base_token_amount - remaining_base_token))
-    }
-
-    pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        fill_levels(&self.levels, amount_in)
     }
 }
 
@@ -264,23 +260,6 @@ mod tests {
             updated_at: None,
         };
         assert_eq!(empty_levels.get_price_for_amount(1.0), None);
-    }
-
-    #[test]
-    fn test_get_amount_out_from_levels() {
-        let levels = liquorice_mm_levels();
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(1.0);
-        assert_eq!(amount_out, 3000.0);
-        assert_eq!(remaining, 0.0);
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(2.0);
-        assert_eq!(amount_out, 5999.0);
-        assert_eq!(remaining, 0.0);
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(5.0);
-        assert_eq!(amount_out, 8998.0);
-        assert_eq!(remaining, 2.0);
     }
 
     #[test]

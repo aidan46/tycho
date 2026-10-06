@@ -23,29 +23,30 @@ use crate::rfq::protocols::bebop::{
 /// Bebop names no market maker and picks the makers behind a firm quote itself, so a swap marks
 /// the whole venue used and a later swap on that state finds no liquidity.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct BebopVenueState {
+pub struct BebopAllPairsState {
     /// Sorted by base token address, then quote token address.
     pairs: Arc<Vec<BebopState>>,
     /// Whether a swap on this state already took Bebop's quote.
     used: bool,
 }
 
-impl fmt::Debug for BebopVenueState {
+impl fmt::Debug for BebopAllPairsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BebopVenueState")
+        f.debug_struct("BebopAllPairsState")
             .field("pairs", &self.pairs.len())
             .field("used", &self.used)
             .finish()
     }
 }
 
-impl BebopVenueState {
+impl BebopAllPairsState {
     /// Fails when a book names a token `tokens` does not carry.
     pub fn new(
         books: Vec<BebopPriceData>,
         tokens: HashMap<Bytes, Token>,
         client: BebopClient,
     ) -> Result<Self, SimulationError> {
+        // The client filters books to its tokens, so an unknown token means corrupt data.
         let token = |address: &Vec<u8>| {
             tokens
                 .get(&Bytes::from(address.clone()))
@@ -105,7 +106,7 @@ impl BebopVenueState {
 }
 
 #[typetag::serde]
-impl ProtocolSim for BebopVenueState {
+impl ProtocolSim for BebopAllPairsState {
     fn fee(&self) -> f64 {
         0.0
     }
@@ -177,7 +178,7 @@ impl ProtocolSim for BebopVenueState {
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         let Some(other) = other
             .as_any()
-            .downcast_ref::<BebopVenueState>()
+            .downcast_ref::<BebopAllPairsState>()
         else {
             return false;
         };
@@ -195,7 +196,7 @@ impl ProtocolSim for BebopVenueState {
 }
 
 #[async_trait]
-impl IndicativelyPriced for BebopVenueState {
+impl IndicativelyPriced for BebopAllPairsState {
     async fn request_signed_quote(
         &self,
         params: GetAmountOutParams,
@@ -241,8 +242,8 @@ mod tests {
         }
     }
 
-    fn state(books: Vec<BebopPriceData>) -> BebopVenueState {
-        BebopVenueState::new(
+    fn state(books: Vec<BebopPriceData>) -> BebopAllPairsState {
+        BebopAllPairsState::new(
             books,
             HashMap::from([
                 (wbtc().address, wbtc()),
@@ -255,7 +256,7 @@ mod tests {
     }
 
     /// WBTC/USDC and WETH/USDC books.
-    fn create_test_bebop_state() -> BebopVenueState {
+    fn create_test_bebop_state() -> BebopAllPairsState {
         state(vec![
             book(
                 &wbtc(),
@@ -325,7 +326,7 @@ mod tests {
         let after_first = first
             .new_state
             .as_any()
-            .downcast_ref::<BebopVenueState>()
+            .downcast_ref::<BebopAllPairsState>()
             .unwrap();
         assert!(after_first.used);
 

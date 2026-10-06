@@ -42,13 +42,13 @@ impl LiquoriceClientBuilder {
     }
 
     /// The components the client streams. One per pair, by default. Register a `PerPair` client
-    /// with `LiquoriceState` and a `PerChain` client with `LiquoriceVenueState`.
+    /// with `LiquoriceState` and a `AllPairs` client with `LiquoriceAllPairsState`.
     pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
         self.component_layout = component_layout;
         self
     }
 
-    /// How often one route may take quotes from Liquorice, under the `PerChain` layout. Every
+    /// How often one route may take quotes from Liquorice, under the `AllPairs` layout. Every
     /// maker once, by default.
     pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
         self.quote_rule = quote_rule;

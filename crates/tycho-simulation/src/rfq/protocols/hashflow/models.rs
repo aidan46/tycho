@@ -85,17 +85,11 @@ impl HashflowMarketMakerLevels {
         }
 
         let (total_quote_token, remaining_base_token) =
-            self.get_amount_out_from_levels(base_token_amount);
+            fill_levels(&self.levels, base_token_amount);
 
         // If we can't fill the whole order (ran out of liquidity), calculate the price based on
         // the amount that we could fill, in order to have at least some price estimate
         Some(total_quote_token / (base_token_amount - remaining_base_token))
-    }
-
-    /// The quote token amount for `amount_in` base tokens, and the base tokens the levels could
-    /// not fill.
-    pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        fill_levels(&self.levels, amount_in)
     }
 }
 
@@ -313,26 +307,6 @@ mod tests {
             levels: vec![],
         };
         assert_eq!(empty_mm_level.get_price(1.0), None);
-    }
-
-    #[test]
-    fn test_get_amount_out_from_levels() {
-        let mm_level = hashflow_level();
-
-        // Test exact amount that can be filled with a single level
-        let (amount_out, remaining) = mm_level.get_amount_out_from_levels(1.0);
-        assert_eq!(amount_out, 3000.0); // 1.0 * 3000.0
-        assert_eq!(remaining, 0.0);
-
-        // Test amount spanning multiple levels
-        let (amount_out, remaining) = mm_level.get_amount_out_from_levels(2.0);
-        assert_eq!(amount_out, 5999.0); // 1.0 * 3000.0 + 1.0 * 2999.0
-        assert_eq!(remaining, 0.0);
-
-        // Test amount exceeding available liquidity
-        let (amount_out, remaining) = mm_level.get_amount_out_from_levels(5.0);
-        assert_eq!(amount_out, 8998.0); // 1.0 * 3000.0 + 2.0 * 2999.0 = 3000.0 + 5998.0
-        assert_eq!(remaining, 2.0); // 5.0 - 3.0 (total available)
     }
 
     #[cfg(test)]

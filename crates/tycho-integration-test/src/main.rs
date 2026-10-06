@@ -42,7 +42,8 @@ use tycho_simulation::{
         protocols::{
             component::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
             hashflow::{
-                client::HashflowClient, state::HashflowState, venue_state::HashflowVenueState,
+                all_pairs_state::HashflowAllPairsState, client::HashflowClient,
+                state::HashflowState,
             },
             liquorice::{client::LiquoriceClient, state::LiquoriceState},
         },
@@ -110,10 +111,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
-    /// Stream RFQ venues as one component per chain where the client supports it. A swap then
-    /// limits how often the route may quote the venue again. One component per pair by default.
+    /// Stream RFQ venues as one component for all token pairs where the client supports it. A
+    /// swap then limits how often the route may quote the venue again. One component per pair by
+    /// default.
     #[arg(long, default_value_t = false)]
-    rfq_per_chain: bool,
+    rfq_all_pairs: bool,
 
     /// Run PAMM RFQ protocols.
     #[arg(long, default_value_t = true)]
@@ -339,8 +341,8 @@ fn hashflow_min_amount_in(
     }
     state
         .as_any()
-        .downcast_ref::<HashflowVenueState>()?
-        .books
+        .downcast_ref::<HashflowAllPairsState>()?
+        .price_levels
         .minimum_amount_in(&token_in.address, &token_out.address)
 }
 
@@ -522,8 +524,8 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.run_pamm_protocols,
         )
         .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"))
-        .with_component_layout(match cli.rfq_per_chain {
-            true => ComponentLayout::PerChain,
+        .with_component_layout(match cli.rfq_all_pairs {
+            true => ComponentLayout::AllPairs,
             false => ComponentLayout::PerPair,
         });
         rfq_handle = Some(
@@ -1676,7 +1678,7 @@ async fn process_state(
         error!("Component has less than 2 tokens, skipping...");
         return HashMap::new();
     }
-    // An RFQ venue component names every token the venue quotes; its swap directions attribute
+    // An RFQ all-pairs component names every token the venue quotes; its swap directions attribute
     // says which of them are paired.
     let swap_directions = match component
         .static_attributes

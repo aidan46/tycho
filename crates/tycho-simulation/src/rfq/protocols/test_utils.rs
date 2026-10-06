@@ -30,7 +30,7 @@ use crate::{
         models::{PriceLevel, TimestampHeader},
         protocols::{
             component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
-            maker_books::MakerBook,
+            maker_price_levels::MakerPriceLevels,
         },
     },
 };
@@ -67,14 +67,14 @@ pub fn usdc_amount(whole: f64) -> BigUint {
     BigUint::from((whole * 1e6) as u128)
 }
 
-/// `market_maker`'s book selling `base` for `quote`, from `(quantity, price)` levels.
-pub fn maker_book(
+/// `market_maker`'s price levels selling `base` for `quote`, from `(quantity, price)` levels.
+pub fn maker_price_levels(
     market_maker: &str,
     base: &Token,
     quote: &Token,
     levels: &[(f64, f64)],
-) -> MakerBook {
-    MakerBook {
+) -> MakerPriceLevels {
+    MakerPriceLevels {
         market_maker: market_maker.to_string(),
         base_token: base.address.clone(),
         quote_token: quote.address.clone(),
@@ -122,8 +122,8 @@ where
     .await
 }
 
-/// A venue component carrying `books`, and the tokens it names.
-pub fn venue_snapshot(
+/// An all-pairs component carrying `books`, and the tokens it names.
+pub fn all_pairs_snapshot(
     protocol_system: &str,
     tokens: &[Token],
     books: &impl Serialize,

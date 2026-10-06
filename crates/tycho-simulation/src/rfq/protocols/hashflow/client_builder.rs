@@ -66,13 +66,13 @@ impl HashflowClientBuilder {
     }
 
     /// The components the client streams. One per pair, by default. Register a `PerPair` client
-    /// with `HashflowState` and a `PerChain` client with `HashflowVenueState`.
+    /// with `HashflowState` and a `AllPairs` client with `HashflowAllPairsState`.
     pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
         self.component_layout = component_layout;
         self
     }
 
-    /// How often one route may take quotes from Hashflow, under the `PerChain` layout. Every
+    /// How often one route may take quotes from Hashflow, under the `AllPairs` layout. Every
     /// maker once, by default.
     pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
         self.quote_rule = quote_rule;

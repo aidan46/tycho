@@ -56,9 +56,9 @@ pub fn decode_swap_directions(attribute: &[u8]) -> Result<Vec<(Bytes, Bytes)>, S
         .collect())
 }
 
-/// The venue's component for one poll. Its `tokens` are every token a direction names.
+/// The all-pairs component for one poll. Its `tokens` are every token a direction names.
 #[allow(clippy::too_many_arguments)]
-pub fn venue_component<B: Serialize>(
+pub fn all_pairs_component<B: Serialize>(
     protocol_system: &str,
     protocol_type_name: &str,
     chain: Chain,
@@ -97,8 +97,8 @@ pub fn venue_component<B: Serialize>(
     })
 }
 
-/// What a venue component carries.
-pub struct DecodedVenue<B> {
+/// What an all-pairs component carries.
+pub struct DecodedAllPairs<B> {
     pub books: Vec<B>,
     pub tokens: HashMap<Bytes, Token>,
     /// `None` when the component carries no `quote_rule` attribute; the builder default applies.
@@ -107,10 +107,10 @@ pub struct DecodedVenue<B> {
 
 /// A missing `books` attribute is a venue with no books. Every token the component names must
 /// be in `all_tokens`. Fails on a per-pair component, which has no `swap_directions` attribute.
-pub fn decode_venue<B: DeserializeOwned>(
+pub fn decode_all_pairs_component<B: DeserializeOwned>(
     snapshot: &ComponentWithState,
     all_tokens: &HashMap<Bytes, Token>,
-) -> Result<DecodedVenue<B>, InvalidSnapshotError> {
+) -> Result<DecodedAllPairs<B>, InvalidSnapshotError> {
     if !snapshot
         .component
         .static_attributes
@@ -118,7 +118,7 @@ pub fn decode_venue<B: DeserializeOwned>(
     {
         return Err(InvalidSnapshotError::MissingAttribute(format!(
             "Component {} of {} has no {SWAP_DIRECTIONS_ATTRIBUTE} attribute, so its client \
-             streams per pair. Build the client with ComponentLayout::PerChain, or register the \
+             streams per pair. Build the client with ComponentLayout::AllPairs, or register the \
              per-pair state for it.",
             snapshot.component.id, snapshot.component.protocol_system
         )));
@@ -141,7 +141,7 @@ pub fn decode_venue<B: DeserializeOwned>(
     };
     let quote_rule = QuoteRule::from_attributes(&snapshot.component.static_attributes)
         .map_err(InvalidSnapshotError::ValueError)?;
-    Ok(DecodedVenue { books, tokens, quote_rule })
+    Ok(DecodedAllPairs { books, tokens, quote_rule })
 }
 
 /// Seconds since the UNIX epoch.
@@ -185,7 +185,7 @@ fn sync_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rfq::protocols::test_utils::{usdc, venue_snapshot, weth};
+    use crate::rfq::protocols::test_utils::{all_pairs_snapshot, usdc, weth};
 
     #[test]
     fn swap_directions_round_trip() {
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn component_tokens_are_the_directions_tokens() {
         let directions = BTreeSet::from([(weth().address, usdc().address)]);
-        let component = venue_component(
+        let component = all_pairs_component(
             "rfq:test",
             "test_pool",
             Chain::Ethereum,
@@ -234,45 +234,45 @@ mod tests {
     }
 
     #[test]
-    fn decode_venue_missing_token() {
-        let (snapshot, mut tokens) = venue_snapshot("rfq:test", &[weth(), usdc()], &["book"]);
+    fn decode_all_pairs_component_missing_token() {
+        let (snapshot, mut tokens) = all_pairs_snapshot("rfq:test", &[weth(), usdc()], &["book"]);
         tokens.remove(&weth().address);
-        let result = decode_venue::<String>(&snapshot, &tokens);
+        let result = decode_all_pairs_component::<String>(&snapshot, &tokens);
         assert!(
             matches!(result, Err(InvalidSnapshotError::ValueError(msg)) if msg.contains("Token not found"))
         );
     }
 
     #[test]
-    fn decode_venue_invalid_books_json() {
-        let (mut snapshot, tokens) = venue_snapshot("rfq:test", &[weth(), usdc()], &["book"]);
+    fn decode_all_pairs_component_invalid_books_json() {
+        let (mut snapshot, tokens) = all_pairs_snapshot("rfq:test", &[weth(), usdc()], &["book"]);
         snapshot
             .state
             .attributes
             .insert(BOOKS_ATTRIBUTE.to_string(), b"invalid json".into());
-        let result = decode_venue::<String>(&snapshot, &tokens);
+        let result = decode_all_pairs_component::<String>(&snapshot, &tokens);
         assert!(
             matches!(result, Err(InvalidSnapshotError::ValueError(msg)) if msg.contains("Invalid books JSON"))
         );
     }
 
     #[test]
-    fn decode_venue_rejects_per_pair_component() {
-        let (mut snapshot, tokens) = venue_snapshot("rfq:test", &[weth(), usdc()], &["book"]);
+    fn decode_all_pairs_component_rejects_per_pair_component() {
+        let (mut snapshot, tokens) = all_pairs_snapshot("rfq:test", &[weth(), usdc()], &["book"]);
         snapshot
             .component
             .static_attributes
             .remove(SWAP_DIRECTIONS_ATTRIBUTE);
-        let result = decode_venue::<String>(&snapshot, &tokens);
+        let result = decode_all_pairs_component::<String>(&snapshot, &tokens);
         assert!(
-            matches!(result, Err(InvalidSnapshotError::MissingAttribute(msg)) if msg.contains("PerChain"))
+            matches!(result, Err(InvalidSnapshotError::MissingAttribute(msg)) if msg.contains("AllPairs"))
         );
     }
 
     #[test]
     fn poll_message_removes_dropped_components() {
         let pair = |id: &str| {
-            let mut component = venue_component(
+            let mut component = all_pairs_component(
                 "rfq:test",
                 "test_pool",
                 Chain::Ethereum,

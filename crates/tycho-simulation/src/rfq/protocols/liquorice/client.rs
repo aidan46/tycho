@@ -34,7 +34,7 @@ use crate::{
                 LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
                 LiquoriceTokenPairPrice,
             },
-            maker_books::{self, MakerBook},
+            maker_price_levels::{self, MakerLevelsWithTvl, MakerPriceLevels},
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
@@ -62,7 +62,7 @@ pub struct LiquoriceClient {
     quote_expiry_secs: u64,
     #[serde(default)]
     component_layout: ComponentLayout,
-    /// How often one route may take quotes from Liquorice. Read only by the per-chain layout.
+    /// How often one route may take quotes from Liquorice. Read only by the all-pairs layout.
     #[serde(default = "LiquoriceClient::default_quote_rule")]
     quote_rule: QuoteRule,
     /// Liquorice issues credentials under two schemes: newer accounts use
@@ -126,7 +126,7 @@ impl LiquoriceClient {
     fn stream_name(&self) -> &'static str {
         match self.component_layout {
             ComponentLayout::PerPair => "liquorice",
-            ComponentLayout::PerChain => "liquorice_per_chain",
+            ComponentLayout::AllPairs => "liquorice_all_pairs",
         }
     }
 
@@ -239,11 +239,11 @@ impl LiquoriceClient {
 
     /// Every market maker's prices on a pair whose tokens the client requested and whose TVL
     /// clears the threshold, each with its normalized TVL.
-    fn priced_levels<'a>(
+    fn levels_above_tvl_threshold<'a>(
         &self,
         prices_by_mm: &'a HashMap<String, Vec<LiquoriceTokenPairPrice>>,
-    ) -> Result<Vec<(&'a str, &'a LiquoriceTokenPairPrice, f64)>, RFQError> {
-        let mut priced = Vec::new();
+    ) -> Result<Vec<MakerLevelsWithTvl<'a, LiquoriceTokenPairPrice>>, RFQError> {
+        let mut kept = Vec::new();
         for (mm_name, token_pair_prices) in prices_by_mm.iter() {
             for token_pair_price in token_pair_prices {
                 let base_token = &token_pair_price.base_token;
@@ -270,14 +270,18 @@ impl LiquoriceClient {
                     );
                     continue;
                 }
-                priced.push((mm_name.as_str(), token_pair_price, normalized_tvl));
+                kept.push(MakerLevelsWithTvl {
+                    market_maker: mm_name,
+                    levels: token_pair_price,
+                    tvl: normalized_tvl,
+                });
             }
         }
-        Ok(priced)
+        Ok(kept)
     }
 
-    /// One component per pair in `priced_levels`, holding every market maker on the pair. The
-    /// component's TVL is the largest maker's.
+    /// One component per pair in `levels_above_tvl_threshold`, holding every market maker on the
+    /// pair. The component's TVL is the largest maker's.
     fn pair_components(
         &self,
         prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
@@ -289,7 +293,12 @@ impl LiquoriceClient {
             tvl: f64,
         }
         let mut pair_mm_prices: HashMap<(Bytes, Bytes), PricesWithTvl> = HashMap::new();
-        for (mm_name, token_pair_price, normalized_tvl) in self.priced_levels(prices_by_mm)? {
+        for MakerLevelsWithTvl {
+            market_maker: mm_name,
+            levels: token_pair_price,
+            tvl: normalized_tvl,
+        } in self.levels_above_tvl_threshold(prices_by_mm)?
+        {
             let entry = pair_mm_prices
                 .entry((token_pair_price.base_token.clone(), token_pair_price.quote_token.clone()))
                 .or_insert_with(|| PricesWithTvl {
@@ -318,32 +327,29 @@ impl LiquoriceClient {
         Ok(new_components)
     }
 
-    /// The id of the per-chain component.
-    pub fn component_id(&self) -> String {
-        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
-    }
-
-    /// The venue component for one poll: every book in `priced_levels`. `None` when there is
-    /// none.
-    fn venue_component(
+    /// The all-pairs component for one poll: every maker's price levels in
+    /// `levels_above_tvl_threshold`. `None` when there is none.
+    fn all_pairs_component(
         &self,
         prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
     ) -> Result<Option<ComponentWithState>, RFQError> {
-        let mut books = Vec::new();
-        for (mm_name, token_pair_price, tvl) in self.priced_levels(prices_by_mm)? {
-            let book = MakerBook {
+        let mut price_levels = Vec::new();
+        for MakerLevelsWithTvl { market_maker: mm_name, levels: token_pair_price, tvl } in
+            self.levels_above_tvl_threshold(prices_by_mm)?
+        {
+            let maker_levels = MakerPriceLevels {
                 market_maker: mm_name.to_string(),
                 base_token: token_pair_price.base_token.clone(),
                 quote_token: token_pair_price.quote_token.clone(),
                 levels: token_pair_price.levels.clone(),
             };
-            books.push((book, tvl));
+            price_levels.push((maker_levels, tvl));
         }
-        maker_books::venue_component(
+        maker_price_levels::all_pairs_component(
             Self::PROTOCOL_SYSTEM,
             "liquorice_pool",
             self.chain,
-            books,
+            price_levels,
             self.quote_rule,
         )
     }
@@ -493,17 +499,8 @@ impl LiquoriceClient {
         Ok(price_response.prices)
     }
 
-    /// Requests a firm quote and takes the level of `market_maker` alone.
-    pub(crate) async fn request_binding_quote_from_maker(
-        &self,
-        params: &GetAmountOutParams,
-        market_maker: &str,
-    ) -> Result<SignedQuote, RFQError> {
-        self.request_quote(params, Some(market_maker))
-            .await
-    }
-
-    async fn request_quote(
+    /// Requests a firm quote. With `market_maker`, takes that maker's level alone.
+    pub(crate) async fn request_quote(
         &self,
         params: &GetAmountOutParams,
         market_maker: Option<&str>,
@@ -685,7 +682,7 @@ impl RFQClient for LiquoriceClient {
                 info!("Fetched price levels from {} market makers", prices_by_mm.len());
                 let components = match client.component_layout {
                     ComponentLayout::PerPair => client.pair_components(&prices_by_mm)?,
-                    ComponentLayout::PerChain => match client.venue_component(&prices_by_mm) {
+                    ComponentLayout::AllPairs => match client.all_pairs_component(&prices_by_mm) {
                         Ok(component) => component
                             .into_iter()
                             .map(|component| (component.component.id.clone(), component))
@@ -724,7 +721,7 @@ mod tests {
                 LiquoricePartialFill, LiquoriceQuoteLevel, LiquoriceQuoteResponse,
                 LiquoriceTokenPairPrice, LiquoriceTx,
             },
-            maker_books::MakerBook,
+            maker_price_levels::MakerPriceLevels,
             test_utils::{mock_quote_server, quote_params, LIQUORICE_QUOTE_RESPONSE},
         },
     };
@@ -984,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn test_venue_component_keeps_books_above_tvl_threshold() {
+    fn test_all_pairs_component_keeps_books_above_tvl_threshold() {
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
         let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
@@ -1005,12 +1002,19 @@ mod tests {
         ]);
 
         let component = client
-            .venue_component(&prices_by_mm)
+            .all_pairs_component(&prices_by_mm)
             .unwrap()
-            .expect("two books clear the threshold");
+            .expect("two makers' price levels clear the threshold");
 
-        assert_eq!(component.component.id, client.component_id());
-        assert_eq!(component.component_tvl, Some(9000.0), "the WBTC book is below the threshold");
+        assert_eq!(
+            component.component.id,
+            component::component_id(LiquoriceClient::PROTOCOL_SYSTEM, client.chain)
+        );
+        assert_eq!(
+            component.component_tvl,
+            Some(9000.0),
+            "the WBTC price levels are below the threshold"
+        );
         let mut expected_tokens = vec![weth.clone(), usdc.clone()];
         expected_tokens.sort();
         assert_eq!(component.component.tokens, expected_tokens);
@@ -1024,12 +1028,12 @@ mod tests {
             component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
             b"once_per_maker"
         );
-        let books: Vec<MakerBook> =
+        let price_levels: Vec<MakerPriceLevels> =
             serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
-        assert_eq!(books.len(), 2);
-        assert_eq!(books[0].market_maker, "mm_a", "books are sorted by maker");
-        assert_eq!(books[0].levels[0].quantity, 2.0);
-        assert_eq!(books[1].market_maker, "mm_b");
+        assert_eq!(price_levels.len(), 2);
+        assert_eq!(price_levels[0].market_maker, "mm_a", "price levels are sorted by maker");
+        assert_eq!(price_levels[0].levels[0].quantity, 2.0);
+        assert_eq!(price_levels[1].market_maker, "mm_b");
     }
 
     /// Each component carries the id and attributes the per-pair state decodes.

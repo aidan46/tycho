@@ -17,21 +17,21 @@ use tycho_simulation::rfq::{
     models::ComponentLayout,
     protocols::{
         bebop::{
-            client::BebopClient, client_builder::BebopClientBuilder, state::BebopState,
-            venue_state::BebopVenueState,
+            all_pairs_state::BebopAllPairsState, client::BebopClient,
+            client_builder::BebopClientBuilder, state::BebopState,
         },
         hashflow::{
-            client::HashflowClient, client_builder::HashflowClientBuilder, state::HashflowState,
-            venue_state::HashflowVenueState,
+            all_pairs_state::HashflowAllPairsState, client::HashflowClient,
+            client_builder::HashflowClientBuilder, state::HashflowState,
         },
         liquorice::{
-            client::LiquoriceClient, client_builder::LiquoriceClientBuilder, state::LiquoriceState,
-            venue_state::LiquoriceVenueState,
+            all_pairs_state::LiquoriceAllPairsState, client::LiquoriceClient,
+            client_builder::LiquoriceClientBuilder, state::LiquoriceState,
         },
         metric::{client::MetricClient, client_builder::MetricClientBuilder, state::MetricState},
         native::{
-            client::NativeClient, client_builder::NativeClientBuilder,
-            models::NativeSupportedChain, state::NativeState, venue_state::NativeVenueState,
+            all_pairs_state::NativeAllPairsState, client::NativeClient,
+            client_builder::NativeClientBuilder, models::NativeSupportedChain, state::NativeState,
         },
     },
     stream::RFQStreamBuilder,
@@ -188,9 +188,9 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = match self.component_layout {
                         ComponentLayout::PerPair => rfq_stream_builder
                             .add_client::<BebopState>("bebop", Box::new(bebop_client)),
-                        ComponentLayout::PerChain => rfq_stream_builder
-                            .add_client::<BebopVenueState>(
-                                "bebop_per_chain",
+                        ComponentLayout::AllPairs => rfq_stream_builder
+                            .add_client::<BebopAllPairsState>(
+                                "bebop_all_pairs",
                                 Box::new(bebop_client),
                             ),
                     };
@@ -208,9 +208,9 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = match self.component_layout {
                         ComponentLayout::PerPair => rfq_stream_builder
                             .add_client::<HashflowState>("hashflow", Box::new(hashflow_client)),
-                        ComponentLayout::PerChain => rfq_stream_builder
-                            .add_client::<HashflowVenueState>(
-                                "hashflow_per_chain",
+                        ComponentLayout::AllPairs => rfq_stream_builder
+                            .add_client::<HashflowAllPairsState>(
+                                "hashflow_all_pairs",
                                 Box::new(hashflow_client),
                             ),
                     };
@@ -228,9 +228,9 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = match self.component_layout {
                         ComponentLayout::PerPair => rfq_stream_builder
                             .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client)),
-                        ComponentLayout::PerChain => rfq_stream_builder
-                            .add_client::<LiquoriceVenueState>(
-                                "liquorice_per_chain",
+                        ComponentLayout::AllPairs => rfq_stream_builder
+                            .add_client::<LiquoriceAllPairsState>(
+                                "liquorice_all_pairs",
                                 Box::new(liquorice_client),
                             ),
                     };
@@ -247,9 +247,9 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = match self.component_layout {
                         ComponentLayout::PerPair => rfq_stream_builder
                             .add_client::<NativeState>("native", Box::new(native_client)),
-                        ComponentLayout::PerChain => rfq_stream_builder
-                            .add_client::<NativeVenueState>(
-                                "native_per_chain",
+                        ComponentLayout::AllPairs => rfq_stream_builder
+                            .add_client::<NativeAllPairsState>(
+                                "native_all_pairs",
                                 Box::new(native_client),
                             ),
                     };

@@ -163,7 +163,7 @@ impl NativeClient {
     fn stream_name(&self) -> &'static str {
         match self.component_layout {
             ComponentLayout::PerPair => "native",
-            ComponentLayout::PerChain => "native_per_chain",
+            ComponentLayout::AllPairs => "native_all_pairs",
         }
     }
 
@@ -236,11 +236,11 @@ impl NativeClient {
 
     /// Every grouped book whose tokens the client requested and whose TVL clears the threshold,
     /// each with its id and TVL. Books of unrequested tokens still serve TVL conversion.
-    fn priced_books<'a>(
+    fn books_above_tvl_threshold<'a>(
         &self,
         books: &'a HashMap<String, NativePriceData>,
     ) -> Vec<(&'a str, &'a NativePriceData, f64)> {
-        let mut priced = Vec::new();
+        let mut kept = Vec::new();
 
         for (component_id, book) in books {
             // Keep unrequested books available for TVL conversion, but only emit requested
@@ -286,18 +286,18 @@ impl NativeClient {
                 continue;
             }
 
-            priced.push((component_id.as_str(), book, incoming_tvl));
+            kept.push((component_id.as_str(), book, incoming_tvl));
         }
-        priced
+        kept
     }
 
-    /// One component per book in `priced_books`.
+    /// One component per book in `books_above_tvl_threshold`.
     fn pair_components(
         &self,
         books: &HashMap<String, NativePriceData>,
     ) -> HashMap<String, ComponentWithState> {
         let mut new_components = HashMap::new();
-        for (component_id, book, tvl) in self.priced_books(books) {
+        for (component_id, book, tvl) in self.books_above_tvl_threshold(books) {
             let tokens = vec![book.base_address.clone(), book.quote_address.clone()];
             let component_with_state = self.create_component_with_state(
                 component_id.to_string(),
@@ -310,21 +310,16 @@ impl NativeClient {
         new_components
     }
 
-    /// The id of the per-chain component.
-    pub fn component_id(&self) -> String {
-        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
-    }
-
-    /// The venue component for one poll: every book in `priced_books` that has bids or asks.
-    /// `None` when there is none. A book's bids serve its base token in, its asks its quote token
-    /// in.
-    fn venue_component(
+    /// The all-pairs component for one poll: every book in `books_above_tvl_threshold` that has
+    /// bids or asks. `None` when there is none. A book's bids serve its base token in, its asks
+    /// its quote token in.
+    fn all_pairs_component(
         &self,
         grouped_books: &HashMap<String, NativePriceData>,
     ) -> Result<Option<ComponentWithState>, RFQError> {
         let mut books = Vec::new();
         let mut tvl = 0.0;
-        for (_, book, book_tvl) in self.priced_books(grouped_books) {
+        for (_, book, book_tvl) in self.books_above_tvl_threshold(grouped_books) {
             if book.bids.is_empty() && book.asks.is_empty() {
                 continue;
             }
@@ -347,7 +342,7 @@ impl NativeClient {
                 swap_directions.insert((book.quote_address.clone(), book.base_address.clone()));
             }
         }
-        let component = component::venue_component(
+        let component = component::all_pairs_component(
             Self::PROTOCOL_SYSTEM,
             "native_relay_pool",
             self.chain,
@@ -826,7 +821,7 @@ impl RFQClient for NativeClient {
 
                 let components = match client.component_layout {
                     ComponentLayout::PerPair => client.pair_components(&books),
-                    ComponentLayout::PerChain => match client.venue_component(&books) {
+                    ComponentLayout::AllPairs => match client.all_pairs_component(&books) {
                         Ok(component) => component
                             .into_iter()
                             .map(|component| (component.component.id.clone(), component))
@@ -1233,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_venue_component_from_relay_orderbook() {
+    fn creates_all_pairs_component_from_relay_orderbook() {
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
         let client = NativeClient::new(
@@ -1279,17 +1274,23 @@ mod tests {
         ]);
 
         let component = client
-            .venue_component(&books)
+            .all_pairs_component(&books)
             .unwrap()
             .expect("the book clears the threshold");
 
-        assert_eq!(component.component.id, client.component_id());
+        assert_eq!(
+            component.component.id,
+            component::component_id(NativeClient::PROTOCOL_SYSTEM, client.chain)
+        );
         assert_eq!(component.component.protocol_system, NativeClient::PROTOCOL_SYSTEM);
         assert_eq!(component.component.protocol_type_name, "native_relay_pool");
         let mut expected_tokens = vec![weth.clone(), usdt.clone()];
         expected_tokens.sort();
         assert_eq!(component.component.tokens, expected_tokens);
-        assert_eq!(component.state.component_id, client.component_id());
+        assert_eq!(
+            component.state.component_id,
+            component::component_id(NativeClient::PROTOCOL_SYSTEM, client.chain)
+        );
         assert_eq!(
             component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].len(),
             80,
@@ -1934,7 +1935,7 @@ mod tests {
         #[case] include_helper: bool,
         #[case] tvl_threshold: f64,
         #[case] expected_tvl: Option<f64>,
-        #[values(ComponentLayout::PerPair, ComponentLayout::PerChain)] layout: ComponentLayout,
+        #[values(ComponentLayout::PerPair, ComponentLayout::AllPairs)] layout: ComponentLayout,
     ) {
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();

@@ -15,49 +15,50 @@ use tycho_common::{
 };
 
 use crate::rfq::protocols::{
-    hashflow::client::HashflowClient,
-    maker_books::{MakerBook, MakerBooks, MakerVenue},
+    liquorice::client::LiquoriceClient,
+    maker_price_levels::{AllMakerPriceLevels, MakerPriceLevels, MakerPricing},
 };
 
-/// Hashflow's liquidity on one chain: every market maker's levels on every pair it quotes.
+/// Liquorice's liquidity on one chain: every market maker's levels on every pair it quotes.
 ///
 /// A swap takes its quote from one market maker and marks that maker used in the state it
 /// returns. A maker's second quote does not account for its first fill, so by default a later
 /// swap on that state goes to another maker.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct HashflowVenueState {
-    pub books: MakerBooks,
-    pub client: Arc<HashflowClient>,
+pub struct LiquoriceAllPairsState {
+    pub price_levels: AllMakerPriceLevels,
+    pub client: Arc<LiquoriceClient>,
 }
 
-impl fmt::Debug for HashflowVenueState {
+impl fmt::Debug for LiquoriceAllPairsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HashflowVenueState")
-            .field("books", &self.books)
+        f.debug_struct("LiquoriceAllPairsState")
+            .field("price_levels", &self.price_levels)
             .finish_non_exhaustive()
     }
 }
 
-impl HashflowVenueState {
+impl LiquoriceAllPairsState {
     pub fn new(
-        books: Vec<MakerBook>,
+        price_levels: Vec<MakerPriceLevels>,
         tokens: HashMap<Bytes, Token>,
-        client: HashflowClient,
+        client: LiquoriceClient,
     ) -> Result<Self, SimulationError> {
         let rule = client.quote_rule();
-        let books = MakerBooks::new(books, tokens, MakerVenue::Hashflow, rule)?;
-        Ok(Self { books, client: Arc::new(client) })
+        let price_levels =
+            AllMakerPriceLevels::new(price_levels, tokens, MakerPricing::Liquorice, rule)?;
+        Ok(Self { price_levels, client: Arc::new(client) })
     }
 }
 
 #[typetag::serde]
-impl ProtocolSim for HashflowVenueState {
+impl ProtocolSim for LiquoriceAllPairsState {
     fn fee(&self) -> f64 {
         todo!()
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        self.books
+        self.price_levels
             .spot_price(&base.address, &quote.address)
     }
 
@@ -67,16 +68,16 @@ impl ProtocolSim for HashflowVenueState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let fill = self
-            .books
-            .best_fill(&amount_in, &token_in.address, &token_out.address)?;
+        let fill =
+            self.price_levels
+                .best_fill(&amount_in, &token_in.address, &token_out.address)?;
         let new_state = Self {
-            books: self
-                .books
-                .with_used(&fill.book.market_maker),
+            price_levels: self
+                .price_levels
+                .with_used(&fill.maker_levels.market_maker),
             client: self.client.clone(),
         };
-        fill.result(151_000, Box::new(new_state))
+        fill.result(134_000, Box::new(new_state))
     }
 
     fn get_limits(
@@ -84,7 +85,7 @@ impl ProtocolSim for HashflowVenueState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        self.books
+        self.price_levels
             .get_limits(&sell_token, &buy_token)
     }
 
@@ -116,18 +117,18 @@ impl ProtocolSim for HashflowVenueState {
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         let Some(other) = other
             .as_any()
-            .downcast_ref::<HashflowVenueState>()
+            .downcast_ref::<LiquoriceAllPairsState>()
         else {
             return false;
         };
-        self.books == other.books
+        self.price_levels == other.price_levels
     }
 }
 
 #[async_trait]
-impl IndicativelyPriced for HashflowVenueState {
-    /// Asks the market maker `get_amount_out` picks on this state for the same amount, and no
-    /// other: a fallback maker could be one the route already fills against.
+impl IndicativelyPriced for LiquoriceAllPairsState {
+    /// Takes the level of the market maker `get_amount_out` picks on this state for the same
+    /// amount, and no other: another maker's level could be one the route already fills against.
     ///
     /// Call it on the state the swap was simulated on, with the simulated amount. On the state
     /// that swap returned, its maker is used, so the request names another maker or fails.
@@ -135,12 +136,12 @@ impl IndicativelyPriced for HashflowVenueState {
         &self,
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
-        let fill = self
-            .books
-            .best_fill(&params.amount_in, &params.token_in, &params.token_out)?;
+        let fill =
+            self.price_levels
+                .best_fill(&params.amount_in, &params.token_in, &params.token_out)?;
         Ok(self
             .client
-            .request_binding_quote_from_maker(&params, &fill.book.market_maker)
+            .request_quote(&params, Some(&fill.maker_levels.market_maker))
             .await?)
     }
 }
@@ -156,13 +157,13 @@ mod tests {
     use crate::rfq::{
         models::{ComponentLayout, QuoteRule},
         protocols::test_utils::{
-            maker_book, mock_quote_server, quote_params, usdc, wbtc, weth, weth_amount,
-            HASHFLOW_QUOTE_RESPONSE,
+            maker_price_levels, mock_quote_server, quote_params, usdc, wbtc, weth, weth_amount,
+            LIQUORICE_QUOTE_RESPONSE,
         },
     };
 
-    fn client(quote_rule: QuoteRule, quote_endpoint: String) -> HashflowClient {
-        HashflowClient::new(
+    fn client(quote_rule: QuoteRule, quote_endpoint: String) -> LiquoriceClient {
+        LiquoriceClient::new(
             Chain::Ethereum,
             HashSet::new(),
             0.0,
@@ -171,75 +172,79 @@ mod tests {
             "".to_string(),
             Duration::from_secs(0),
             Duration::from_secs(1),
+            300,
         )
         .unwrap()
-        .with_component_layout(ComponentLayout::PerChain)
+        .with_component_layout(ComponentLayout::AllPairs)
         .with_quote_rule(quote_rule)
         .with_quote_endpoint(quote_endpoint)
     }
 
-    /// `test_mm_2` pays more for 0.5 WETH; `test_mm` also quotes WBTC.
-    fn test_state(quote_rule: QuoteRule, quote_endpoint: String) -> HashflowVenueState {
-        HashflowVenueState::new(
+    /// `test_mm` holds 7 WETH, `test_mm_2` 1 WETH at a lower price.
+    fn test_state(quote_rule: QuoteRule) -> LiquoriceAllPairsState {
+        LiquoriceAllPairsState::new(
             vec![
-                maker_book("test_mm", &weth(), &usdc(), &[(0.5, 3000.0), (1.5, 3000.0)]),
-                maker_book("test_mm_2", &weth(), &usdc(), &[(0.5, 3010.0)]),
-                maker_book("test_mm", &wbtc(), &usdc(), &[(1.0, 65000.0)]),
+                maker_price_levels(
+                    "test_mm",
+                    &weth(),
+                    &usdc(),
+                    &[(0.5, 3000.0), (1.5, 3000.0), (5.0, 2999.0)],
+                ),
+                maker_price_levels("test_mm_2", &weth(), &usdc(), &[(1.0, 2998.0)]),
             ],
-            HashMap::from([
-                (weth().address, weth()),
-                (usdc().address, usdc()),
-                (wbtc().address, wbtc()),
-            ]),
-            client(quote_rule, quote_endpoint),
+            HashMap::from([(weth().address, weth()), (usdc().address, usdc())]),
+            client(quote_rule, String::new()),
         )
         .unwrap()
     }
 
     #[test]
     fn get_amount_out_marks_the_maker_used() {
-        let state = test_state(QuoteRule::OncePerMaker, String::new());
+        let state = test_state(QuoteRule::OncePerMaker);
         let result = state
-            .get_amount_out(weth_amount(0.5), &weth(), &usdc())
+            .get_amount_out(weth_amount(1.0), &weth(), &usdc())
             .unwrap();
-        assert_eq!(result.amount, BigUint::from(1_505_000_000u64));
-        assert_eq!(result.gas, BigUint::from(151_000u64));
+        assert_eq!(result.amount, BigUint::from(3_000_000_000u64));
+        assert_eq!(result.gas, BigUint::from(134_000u64));
         let new_state = result
             .new_state
             .as_any()
-            .downcast_ref::<HashflowVenueState>()
+            .downcast_ref::<LiquoriceAllPairsState>()
             .unwrap();
-        assert!(new_state.books == state.books.with_used("test_mm_2"));
+        assert!(new_state.price_levels == state.price_levels.with_used("test_mm"));
     }
 
     #[tokio::test]
-    async fn request_signed_quote_names_the_picked_maker() {
-        let (addr, request_log) = mock_quote_server(0, HASHFLOW_QUOTE_RESPONSE).await;
-        // The mock quote is for 1 WETH -> WBTC, as `quote_params` asks.
-        let state = HashflowVenueState::new(
+    async fn request_signed_quote_takes_the_picked_makers_level() {
+        let (addr, _) = mock_quote_server(0, LIQUORICE_QUOTE_RESPONSE).await;
+        // The mock quote holds one level, from `test-maker`, for 1 WETH -> WBTC.
+        let state = LiquoriceAllPairsState::new(
             vec![
-                maker_book("test_mm", &weth(), &wbtc(), &[(1.0, 0.05)]),
-                maker_book("test_mm_2", &weth(), &wbtc(), &[(1.0, 0.051)]),
+                maker_price_levels("test-maker", &weth(), &wbtc(), &[(1.0, 0.051)]),
+                maker_price_levels("other", &weth(), &wbtc(), &[(1.0, 0.05)]),
             ],
             HashMap::from([(weth().address, weth()), (wbtc().address, wbtc())]),
             client(QuoteRule::OncePerMaker, format!("http://127.0.0.1:{}/rfq", addr.port())),
         )
         .unwrap();
-        state
+        let quote = state
             .request_signed_quote(quote_params())
             .await
             .unwrap();
-        let after_first = HashflowVenueState {
-            books: state.books.with_used("test_mm_2"),
+        assert_eq!(quote.amount_out, BigUint::from(3329502u64));
+
+        let after_first = LiquoriceAllPairsState {
+            price_levels: state
+                .price_levels
+                .with_used("test-maker"),
             client: state.client.clone(),
         };
-        after_first
+        let missing = after_first
             .request_signed_quote(quote_params())
             .await
-            .unwrap();
-
-        let requests = request_log.lock().unwrap();
-        assert!(requests[0].contains("\"marketMakers\":[\"test_mm_2\"]"), "{}", requests[0]);
-        assert!(requests[1].contains("\"marketMakers\":[\"test_mm\"]"), "{}", requests[1]);
+            .unwrap_err();
+        assert!(
+            matches!(missing, SimulationError::FatalError(msg) if msg.contains("quote not found"))
+        );
     }
 }

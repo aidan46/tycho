@@ -30,7 +30,7 @@ use crate::{
                 HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse,
                 HashflowRFQ, HashflowRFQOptions,
             },
-            maker_books::{self, MakerBook},
+            maker_price_levels::{self, MakerLevelsWithTvl, MakerPriceLevels},
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
@@ -59,7 +59,7 @@ pub struct HashflowClient {
     protocol_system: String,
     #[serde(default)]
     component_layout: ComponentLayout,
-    /// How often one route may take quotes from Hashflow. Read only by the per-chain layout.
+    /// How often one route may take quotes from Hashflow. Read only by the all-pairs layout.
     #[serde(default = "HashflowClient::default_quote_rule")]
     quote_rule: QuoteRule,
 }
@@ -127,7 +127,7 @@ impl HashflowClient {
     fn stream_name(&self) -> &'static str {
         match self.component_layout {
             ComponentLayout::PerPair => "hashflow",
-            ComponentLayout::PerChain => "hashflow_per_chain",
+            ComponentLayout::AllPairs => "hashflow_all_pairs",
         }
     }
 
@@ -212,11 +212,11 @@ impl HashflowClient {
 
     /// Every market maker's levels on a pair whose tokens the client requested and whose TVL
     /// clears the threshold, each with its normalized TVL.
-    fn priced_levels<'a>(
+    fn levels_above_tvl_threshold<'a>(
         &self,
         levels_by_mm: &'a HashMap<String, Vec<HashflowMarketMakerLevels>>,
-    ) -> Result<Vec<(&'a str, &'a HashflowMarketMakerLevels, f64)>, RFQError> {
-        let mut priced = Vec::new();
+    ) -> Result<Vec<MakerLevelsWithTvl<'a, HashflowMarketMakerLevels>>, RFQError> {
+        let mut kept = Vec::new();
         for (mm_name, mm_levels) in levels_by_mm.iter() {
             for mm_level in mm_levels {
                 let base_token = &mm_level.pair.base_token;
@@ -238,20 +238,26 @@ impl HashflowClient {
                     );
                     continue;
                 }
-                priced.push((mm_name.as_str(), mm_level, normalized_tvl));
+                kept.push(MakerLevelsWithTvl {
+                    market_maker: mm_name,
+                    levels: mm_level,
+                    tvl: normalized_tvl,
+                });
             }
         }
-        Ok(priced)
+        Ok(kept)
     }
 
-    /// One component per pair in `priced_levels`. When several market makers quote a pair, the
-    /// component holds one of them.
+    /// One component per pair in `levels_above_tvl_threshold`. When several market makers quote a
+    /// pair, the component holds one of them.
     fn pair_components(
         &self,
         levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
     ) -> Result<HashMap<String, ComponentWithState>, RFQError> {
         let mut new_components = HashMap::new();
-        for (mm_name, mm_level, tvl) in self.priced_levels(levels_by_mm)? {
+        for MakerLevelsWithTvl { market_maker: mm_name, levels: mm_level, tvl } in
+            self.levels_above_tvl_threshold(levels_by_mm)?
+        {
             let component_id = pair_component_id(mm_level);
             let tokens = vec![mm_level.pair.base_token.clone(), mm_level.pair.quote_token.clone()];
             let component_with_state = self.create_component_with_state(
@@ -266,49 +272,37 @@ impl HashflowClient {
         Ok(new_components)
     }
 
-    /// The id of the per-chain component.
-    pub fn component_id(&self) -> String {
-        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
-    }
-
-    /// The venue component for one poll: every book in `priced_levels`. `None` when there is
-    /// none.
-    fn venue_component(
+    /// The all-pairs component for one poll: every maker's price levels in
+    /// `levels_above_tvl_threshold`. `None` when there is none.
+    fn all_pairs_component(
         &self,
         levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
     ) -> Result<Option<ComponentWithState>, RFQError> {
-        let mut books = Vec::new();
-        for (mm_name, mm_level, tvl) in self.priced_levels(levels_by_mm)? {
-            let book = MakerBook {
+        let mut price_levels = Vec::new();
+        for MakerLevelsWithTvl { market_maker: mm_name, levels: mm_level, tvl } in
+            self.levels_above_tvl_threshold(levels_by_mm)?
+        {
+            let maker_levels = MakerPriceLevels {
                 market_maker: mm_name.to_string(),
                 base_token: mm_level.pair.base_token.clone(),
                 quote_token: mm_level.pair.quote_token.clone(),
                 levels: mm_level.levels.clone(),
             };
-            books.push((book, tvl));
+            price_levels.push((maker_levels, tvl));
         }
-        maker_books::venue_component(
+        maker_price_levels::all_pairs_component(
             Self::PROTOCOL_SYSTEM,
             "hashflow_pool",
             self.chain,
-            books,
+            price_levels,
             self.quote_rule,
         )
     }
 
-    /// Requests a firm quote from `market_maker` alone. Hashflow is asked with
+    /// Requests a firm quote. With `market_maker`, Hashflow is asked for that maker alone with
     /// `doNotRetryWithOtherMakers`, so a declined request is an error and not a quote from a
     /// maker the caller did not choose.
-    pub(crate) async fn request_binding_quote_from_maker(
-        &self,
-        params: &GetAmountOutParams,
-        market_maker: &str,
-    ) -> Result<SignedQuote, RFQError> {
-        self.request_quote(params, Some(market_maker))
-            .await
-    }
-
-    async fn request_quote(
+    pub(crate) async fn request_quote(
         &self,
         params: &GetAmountOutParams,
         market_maker: Option<&str>,
@@ -743,7 +737,7 @@ impl RFQClient for HashflowClient {
                 info!("Fetched price levels from {} market makers", levels_by_mm.len());
                 let components = match client.component_layout {
                     ComponentLayout::PerPair => client.pair_components(&levels_by_mm)?,
-                    ComponentLayout::PerChain => match client.venue_component(&levels_by_mm) {
+                    ComponentLayout::AllPairs => match client.all_pairs_component(&levels_by_mm) {
                         Ok(component) => component
                             .into_iter()
                             .map(|component| (component.component.id.clone(), component))
@@ -901,7 +895,7 @@ mod tests {
 
     #[rstest]
     #[case::per_pair(ComponentLayout::PerPair)]
-    #[case::per_chain(ComponentLayout::PerChain)]
+    #[case::all_pairs(ComponentLayout::AllPairs)]
     #[tokio::test]
     #[ignore] // Requires network access and HASHFLOW_KEY environment variable
     async fn test_hashflow_api_polling(#[case] layout: ComponentLayout) {
@@ -953,8 +947,8 @@ mod tests {
                         println!("Received {} components in this message (Total so far: {})",
                                 snapshot.states.len(), total_components_received);
 
-                        if layout == ComponentLayout::PerChain {
-                            assert!(snapshot.states.len() <= 1, "one venue component per chain");
+                        if layout == ComponentLayout::AllPairs {
+                            assert!(snapshot.states.len() <= 1, "one all-pairs component");
                         }
                         for (id, component_with_state) in &snapshot.states {
                             let attributes = &component_with_state.state.attributes;
@@ -963,11 +957,15 @@ mod tests {
                                     assert!(!attributes["levels"].is_empty());
                                     assert!(!attributes["mm"].is_empty());
                                 }
-                                ComponentLayout::PerChain => {
-                                    assert_eq!(id, &client.component_id());
-                                    let books: Vec<MakerBook> =
+                                ComponentLayout::AllPairs => {
+                                    let expected_id = component::component_id(
+                                        HashflowClient::PROTOCOL_SYSTEM,
+                                        client.chain,
+                                    );
+                                    assert_eq!(id, &expected_id);
+                                    let price_levels: Vec<MakerPriceLevels> =
                                         serde_json::from_slice(&attributes[BOOKS_ATTRIBUTE]).unwrap();
-                                    assert!(!books.is_empty());
+                                    assert!(!price_levels.is_empty());
                                     let directions = &component_with_state.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE];
                                     assert_eq!(directions.len() % 40, 0);
                                 }
@@ -1167,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_binding_quote_from_maker() {
+    async fn test_request_quote_from_maker() {
         let (addr, request_log) = mock_quote_server(0, HASHFLOW_QUOTE_RESPONSE).await;
         let client = create_test_hashflow_client(
             format!("http://127.0.0.1:{}/rfq", addr.port()),
@@ -1175,7 +1173,7 @@ mod tests {
         );
 
         client
-            .request_binding_quote_from_maker(&quote_params(), "mm1")
+            .request_quote(&quote_params(), Some("mm1"))
             .await
             .unwrap();
 
@@ -1213,7 +1211,7 @@ mod tests {
     }
 
     /// WETH and WBTC quoted against USDC by two makers, with USDC as the TVL quote token.
-    fn venue_test_client() -> (HashflowClient, Bytes, Bytes, Bytes) {
+    fn all_pairs_test_client() -> (HashflowClient, Bytes, Bytes, Bytes) {
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
         let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
@@ -1226,8 +1224,8 @@ mod tests {
     }
 
     #[test]
-    fn test_venue_component_keeps_books_above_tvl_threshold() {
-        let (client, weth, wbtc, usdc) = venue_test_client();
+    fn test_all_pairs_component_keeps_books_above_tvl_threshold() {
+        let (client, weth, wbtc, usdc) = all_pairs_test_client();
         let levels_by_mm = HashMap::from([
             (
                 "mm_b".to_string(),
@@ -1240,12 +1238,19 @@ mod tests {
         ]);
 
         let component = client
-            .venue_component(&levels_by_mm)
+            .all_pairs_component(&levels_by_mm)
             .unwrap()
-            .expect("two books clear the threshold");
+            .expect("two makers' price levels clear the threshold");
 
-        assert_eq!(component.component.id, client.component_id());
-        assert_eq!(component.component_tvl, Some(9000.0), "the WBTC book is below the threshold");
+        assert_eq!(
+            component.component.id,
+            component::component_id(HashflowClient::PROTOCOL_SYSTEM, client.chain)
+        );
+        assert_eq!(
+            component.component_tvl,
+            Some(9000.0),
+            "the WBTC price levels are below the threshold"
+        );
         let mut expected_tokens = vec![weth.clone(), usdc.clone()];
         expected_tokens.sort();
         assert_eq!(component.component.tokens, expected_tokens);
@@ -1260,19 +1265,19 @@ mod tests {
             b"once_per_maker"
         );
 
-        let books: Vec<MakerBook> =
+        let price_levels: Vec<MakerPriceLevels> =
             serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
-        assert_eq!(books.len(), 2);
-        assert_eq!(books[0].market_maker, "mm_a", "books are sorted by maker");
-        assert_eq!(books[0].levels[0].quantity, 2.0);
-        assert_eq!(books[1].market_maker, "mm_b");
-        assert_eq!(books[1].base_token, weth);
+        assert_eq!(price_levels.len(), 2);
+        assert_eq!(price_levels[0].market_maker, "mm_a", "price levels are sorted by maker");
+        assert_eq!(price_levels[0].levels[0].quantity, 2.0);
+        assert_eq!(price_levels[1].market_maker, "mm_b");
+        assert_eq!(price_levels[1].base_token, weth);
     }
 
     /// Each component carries the id and attributes the per-pair state decodes.
     #[test]
     fn test_pair_components_keep_pairs_above_tvl_threshold() {
-        let (client, weth, wbtc, usdc) = venue_test_client();
+        let (client, weth, wbtc, usdc) = all_pairs_test_client();
         let levels_by_mm = HashMap::from([(
             "mm_a".to_string(),
             vec![

@@ -60,7 +60,7 @@ impl NativeClientBuilder {
     }
 
     /// The components the client streams. One per pair, by default. Register a `PerPair` client
-    /// with `NativeState` and a `PerChain` client with `NativeVenueState`.
+    /// with `NativeState` and a `AllPairs` client with `NativeAllPairsState`.
     pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
         self.component_layout = component_layout;
         self

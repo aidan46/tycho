@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{models::token::Token, Bytes};
 
-use super::{client_builder::LiquoriceClientBuilder, venue_state::LiquoriceVenueState};
+use super::{all_pairs_state::LiquoriceAllPairsState, client_builder::LiquoriceClientBuilder};
 use crate::{
     protocol::{
         errors::InvalidSnapshotError,
@@ -13,13 +13,13 @@ use crate::{
         constants::get_liquorice_auth,
         models::{ComponentLayout, TimestampHeader},
         protocols::{
-            component::{decode_venue, DecodedVenue},
-            maker_books::MakerBook,
+            component::{decode_all_pairs_component, DecodedAllPairs},
+            maker_price_levels::MakerPriceLevels,
         },
     },
 };
 
-impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceVenueState {
+impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceAllPairsState {
     type Error = InvalidSnapshotError;
 
     async fn try_from_with_header(
@@ -29,8 +29,8 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceVenueSta
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let DecodedVenue { books, tokens, quote_rule } =
-            decode_venue::<MakerBook>(&snapshot, all_tokens)?;
+        let DecodedAllPairs { books: price_levels, tokens, quote_rule } =
+            decode_all_pairs_component::<MakerPriceLevels>(&snapshot, all_tokens)?;
 
         let auth = get_liquorice_auth().map_err(|e| {
             InvalidSnapshotError::ValueError(format!("Failed to get Liquorice authentication: {e}"))
@@ -38,7 +38,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceVenueSta
         let mut builder =
             LiquoriceClientBuilder::new(snapshot.component.chain, auth.solver, auth.key)
                 .tokens(tokens.keys().cloned().collect())
-                .component_layout(ComponentLayout::PerChain);
+                .component_layout(ComponentLayout::AllPairs);
         if let Some(quote_rule) = quote_rule {
             builder = builder.quote_rule(quote_rule);
         }
@@ -46,7 +46,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceVenueSta
             InvalidSnapshotError::MissingAttribute(format!("Couldn't create LiquoriceClient: {e}"))
         })?;
 
-        LiquoriceVenueState::new(books, tokens, client)
+        LiquoriceAllPairsState::new(price_levels, tokens, client)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))
     }
 }
@@ -56,14 +56,14 @@ mod tests {
     use std::env;
 
     use super::*;
-    use crate::rfq::protocols::test_utils::{decode, usdc, venue_snapshot, wbtc, weth};
+    use crate::rfq::protocols::test_utils::{all_pairs_snapshot, decode, usdc, wbtc, weth};
 
     #[tokio::test]
-    async fn test_decodes_books() {
+    async fn test_decodes_price_levels() {
         // Two makers on WBTC/USDC and one of them on WETH/USDC.
         env::set_var("LIQUORICE_USER", "test_solver");
         env::set_var("LIQUORICE_KEY", "test_key");
-        let books = serde_json::json!([
+        let price_levels = serde_json::json!([
             {
                 "mm": "test_market_maker",
                 "base_token": wbtc().address, "quote_token": usdc().address,
@@ -80,17 +80,18 @@ mod tests {
                 "levels": [{ "q": "10", "p": "3000.0" }]
             }
         ]);
-        let (snapshot, tokens) = venue_snapshot("rfq:liquorice", &[wbtc(), usdc(), weth()], &books);
-        let state = decode::<LiquoriceVenueState>(snapshot, &tokens)
+        let (snapshot, tokens) =
+            all_pairs_snapshot("rfq:liquorice", &[wbtc(), usdc(), weth()], &price_levels);
+        let state = decode::<LiquoriceAllPairsState>(snapshot, &tokens)
             .await
             .unwrap();
 
-        let wbtc_books = state
-            .books
-            .pair_books(&wbtc().address, &usdc().address);
-        assert_eq!(wbtc_books.len(), 2);
-        assert_eq!(wbtc_books[0].market_maker, "mm_b");
-        assert_eq!(wbtc_books[1].levels[0].quantity, 1.5);
-        assert_eq!(wbtc_books[1].levels[0].price, 65000.0);
+        let wbtc_price_levels = state
+            .price_levels
+            .pair_price_levels(&wbtc().address, &usdc().address);
+        assert_eq!(wbtc_price_levels.len(), 2);
+        assert_eq!(wbtc_price_levels[0].market_maker, "mm_b");
+        assert_eq!(wbtc_price_levels[1].levels[0].quantity, 1.5);
+        assert_eq!(wbtc_price_levels[1].levels[0].price, 65000.0);
     }
 }

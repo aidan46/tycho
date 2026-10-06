@@ -78,10 +78,10 @@ pub enum ComponentLayout {
     /// unchanged, so one route may quote the pair again.
     #[default]
     PerPair,
-    /// One component per chain, decoded by the venue's venue state, such as
-    /// `HashflowVenueState`. A swap marks what it used
+    /// One component for all token pairs, decoded by the venue's all-pairs state, such as
+    /// `HashflowAllPairsState`. A swap marks what it used
     /// in the state it returns, as the venue's [`QuoteRule`] says.
-    PerChain,
+    AllPairs,
 }
 
 /// How often one route may take quotes from an RFQ venue.

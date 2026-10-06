@@ -39,16 +39,17 @@ for any protocol indexed by Tycho.
   those venues' fallback routers. Off by default: those routers are not deployed yet.
   Hashflow, Liquorice, Bebop and Native stream in one of two `rfq::models::ComponentLayout`s,
   set on the client builder. `PerPair` (default) streams one component per token pair, decoded
-  by the per-pair state (`state.rs`, `decoder.rs`). `PerChain` streams one component per chain
-  under a `<venue>_per_chain` stream name, decoded by the venue state (`venue_state.rs`,
-  `venue_decoder.rs`). The per-chain format is the one `rfq/protocols/component.rs` defines:
-  the `books` state attribute and the `swap_directions` static attribute.
-  `rfq/protocols/maker_books.rs` picks the market maker for Hashflow and Liquorice. The Bebop
-  and Native venue states delegate pricing to their per-pair states. `rfq::models::QuoteRule`
-  says how often one route may quote the venue, carried as the `quote_rule` static attribute of
-  a per-chain component: Hashflow and Liquorice builders set it (`quote_rule`, every maker once
-  by default); Bebop and Native name no maker and always quote once. Metric stays one component
-  per pool: its executor takes the pool from the component id
+  by the per-pair state (`state.rs`, `decoder.rs`). `AllPairs` streams one component for all
+  token pairs under a `<venue>_all_pairs` stream name, decoded by the all-pairs state
+  (`all_pairs_state.rs`, `all_pairs_decoder.rs`). The all-pairs format is the one
+  `rfq/protocols/component.rs` defines: the `books` state attribute and the `swap_directions`
+  static attribute. `rfq/protocols/maker_price_levels.rs` picks the market maker for
+  Hashflow and Liquorice. The Bebop and Native all-pairs states delegate pricing to their per-pair
+  states. `rfq::models::QuoteRule` says how often one route may quote
+  the venue, carried as the `quote_rule` static attribute of an all-pairs component: Hashflow
+  and Liquorice builders set it (`quote_rule`, every maker once by default); Bebop and Native
+  name no maker and always quote once. Metric stays one component per pool: its executor takes
+  the pool from the component id
 - **`snapshot_feed/`**: the latest-value feed layer, both ends. `SnapshotFeed` is the contract a
   feed implements: `run(self, publisher)` drives it, and the `Publisher` it is handed — which
   nothing outside the crate can construct — owns the `watch` channel, so reading a feed is the only

@@ -71,7 +71,7 @@ impl BebopClientBuilder {
     }
 
     /// The components the client streams. One per pair, by default. Register a `PerPair` client
-    /// with `BebopState` and a `PerChain` client with `BebopVenueState`.
+    /// with `BebopState` and a `AllPairs` client with `BebopAllPairsState`.
     pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
         self.component_layout = component_layout;
         self

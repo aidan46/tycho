@@ -4,7 +4,8 @@ use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{models::token::Token, Bytes};
 
 use super::{
-    client_builder::NativeClientBuilder, models::NativePriceData, venue_state::NativeVenueState,
+    all_pairs_state::NativeAllPairsState, client_builder::NativeClientBuilder,
+    models::NativePriceData,
 };
 use crate::{
     protocol::{
@@ -13,11 +14,11 @@ use crate::{
     },
     rfq::{
         models::{ComponentLayout, QuoteRule, TimestampHeader},
-        protocols::component::{decode_venue, DecodedVenue},
+        protocols::component::{decode_all_pairs_component, DecodedAllPairs},
     },
 };
 
-impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeVenueState {
+impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeAllPairsState {
     type Error = InvalidSnapshotError;
 
     async fn try_from_with_header(
@@ -27,8 +28,8 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeVenueState 
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let DecodedVenue { books, tokens, quote_rule } =
-            decode_venue::<NativePriceData>(&snapshot, all_tokens)?;
+        let DecodedAllPairs { books, tokens, quote_rule } =
+            decode_all_pairs_component::<NativePriceData>(&snapshot, all_tokens)?;
         if quote_rule.is_some_and(|rule| rule != QuoteRule::OncePerVenue) {
             return Err(InvalidSnapshotError::ValueError(
                 "Native names no market maker; its quote rule is once_per_venue".into(),
@@ -42,13 +43,13 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeVenueState 
                 ))
             })?
             .tokens(tokens.keys().cloned().collect())
-            .component_layout(ComponentLayout::PerChain)
+            .component_layout(ComponentLayout::AllPairs)
             .build()
             .map_err(|e| {
                 InvalidSnapshotError::MissingAttribute(format!("Couldn't create NativeClient: {e}"))
             })?;
 
-        NativeVenueState::new(books, tokens, client)
+        NativeAllPairsState::new(books, tokens, client)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))
     }
 }
@@ -63,7 +64,7 @@ mod tests {
     use super::*;
     use crate::rfq::protocols::{
         native::models::NativePriceLevel,
-        test_utils::{decode, usdc, venue_snapshot, wbtc, weth},
+        test_utils::{all_pairs_snapshot, decode, usdc, wbtc, weth},
     };
 
     fn book(base: &Token, quote: &Token, bid: f64, ask: f64) -> NativePriceData {
@@ -83,13 +84,13 @@ mod tests {
         env::set_var("NATIVE_API_KEY", "test_key");
         let books =
             vec![book(&weth(), &usdc(), 3000.0, 3010.0), book(&wbtc(), &usdc(), 65000.0, 65100.0)];
-        venue_snapshot("rfq:native", &[weth(), usdc(), wbtc()], &books)
+        all_pairs_snapshot("rfq:native", &[weth(), usdc(), wbtc()], &books)
     }
 
     #[tokio::test]
     async fn test_decodes_books() {
         let (snapshot, tokens) = snapshot();
-        let state = decode::<NativeVenueState>(snapshot, &tokens)
+        let state = decode::<NativeAllPairsState>(snapshot, &tokens)
             .await
             .unwrap();
 
@@ -118,7 +119,7 @@ mod tests {
             .component
             .static_attributes
             .insert(QuoteRule::ATTRIBUTE.to_string(), b"once_per_maker".into());
-        let result = decode::<NativeVenueState>(snapshot, &tokens).await;
+        let result = decode::<NativeAllPairsState>(snapshot, &tokens).await;
         assert!(
             matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(msg) if msg.contains("names no market maker"))
         );

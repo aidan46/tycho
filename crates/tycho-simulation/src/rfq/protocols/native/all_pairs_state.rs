@@ -23,7 +23,7 @@ use crate::rfq::protocols::native::{
 /// Native names no market maker, so a swap marks the whole venue used and a later swap on that
 /// state finds no liquidity.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct NativeVenueState {
+pub struct NativeAllPairsState {
     states: Arc<Vec<NativeState>>,
     /// Every direction a book quotes, sorted, with the index of its state in `states`. A book
     /// quoting the pair as given beats one quoting it the other way round.
@@ -31,16 +31,16 @@ pub struct NativeVenueState {
     used: bool,
 }
 
-impl fmt::Debug for NativeVenueState {
+impl fmt::Debug for NativeAllPairsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NativeVenueState")
+        f.debug_struct("NativeAllPairsState")
             .field("books", &self.states.len())
             .field("used", &self.used)
             .finish_non_exhaustive()
     }
 }
 
-impl NativeVenueState {
+impl NativeAllPairsState {
     /// Fails when a book names a token `tokens` does not carry, or when its per-pair state
     /// rejects it.
     pub fn new(
@@ -50,6 +50,7 @@ impl NativeVenueState {
     ) -> Result<Self, SimulationError> {
         let mut states = Vec::with_capacity(books.len());
         for book in books {
+            // The client filters books to its tokens, so an unknown token means corrupt data.
             let (Some(base_token), Some(quote_token)) =
                 (tokens.get(&book.base_address), tokens.get(&book.quote_address))
             else {
@@ -122,7 +123,7 @@ impl NativeVenueState {
 }
 
 #[typetag::serde]
-impl ProtocolSim for NativeVenueState {
+impl ProtocolSim for NativeAllPairsState {
     fn fee(&self) -> f64 {
         0.0
     }
@@ -185,7 +186,7 @@ impl ProtocolSim for NativeVenueState {
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         let Some(other) = other
             .as_any()
-            .downcast_ref::<NativeVenueState>()
+            .downcast_ref::<NativeAllPairsState>()
         else {
             return false;
         };
@@ -203,7 +204,7 @@ impl ProtocolSim for NativeVenueState {
 }
 
 #[async_trait]
-impl IndicativelyPriced for NativeVenueState {
+impl IndicativelyPriced for NativeAllPairsState {
     async fn request_signed_quote(
         &self,
         params: GetAmountOutParams,
@@ -243,7 +244,7 @@ mod tests {
         }
     }
 
-    fn state_with(books: Vec<NativePriceData>) -> Result<NativeVenueState, SimulationError> {
+    fn state_with(books: Vec<NativePriceData>) -> Result<NativeAllPairsState, SimulationError> {
         let client = NativeClient::new(
             Chain::Ethereum,
             String::new(),
@@ -254,15 +255,15 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap()
-        .with_component_layout(ComponentLayout::PerChain);
-        NativeVenueState::new(
+        .with_component_layout(ComponentLayout::AllPairs);
+        NativeAllPairsState::new(
             books,
             HashMap::from([(weth().address, weth()), (usdc().address, usdc())]),
             client,
         )
     }
 
-    fn state() -> NativeVenueState {
+    fn state() -> NativeAllPairsState {
         state_with(vec![book()]).unwrap()
     }
 
@@ -275,7 +276,7 @@ mod tests {
         let after_first = first
             .new_state
             .as_any()
-            .downcast_ref::<NativeVenueState>()
+            .downcast_ref::<NativeAllPairsState>()
             .unwrap();
         assert!(after_first.used);
         assert!(matches!(
@@ -323,7 +324,7 @@ mod tests {
         let new_state = partial
             .new_state
             .as_any()
-            .downcast_ref::<NativeVenueState>()
+            .downcast_ref::<NativeAllPairsState>()
             .unwrap();
         assert!(new_state.used);
     }
