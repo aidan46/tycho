@@ -54,7 +54,7 @@ impl LiquoriceAllPairsState {
 #[typetag::serde]
 impl ProtocolSim for LiquoriceAllPairsState {
     fn fee(&self) -> f64 {
-        todo!()
+        0.0
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
@@ -99,7 +99,7 @@ impl ProtocolSim for LiquoriceAllPairsState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        todo!()
+        Err(TransitionError::DecodeError("Not implemented".into()))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
