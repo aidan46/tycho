@@ -46,22 +46,10 @@ impl BebopAllPairsState {
         tokens: HashMap<Bytes, Token>,
         client: BebopClient,
     ) -> Result<Self, SimulationError> {
-        // The client filters books to its tokens, so an unknown token means corrupt data.
-        let token = |address: &Vec<u8>| {
-            tokens
-                .get(&Bytes::from(address.clone()))
-                .cloned()
-                .ok_or_else(|| {
-                    SimulationError::FatalError(format!(
-                        "Bebop book names token 0x{}, which the state does not carry",
-                        hex::encode(address)
-                    ))
-                })
-        };
         let mut pairs = Vec::with_capacity(books.len());
         for book in books {
-            let base_token = token(&book.base)?;
-            let quote_token = token(&book.quote)?;
+            let base_token = book_token(&tokens, &book.base)?;
+            let quote_token = book_token(&tokens, &book.quote)?;
             pairs.push(BebopState::new(base_token, quote_token, book, client.clone()));
         }
         pairs.sort_by(|a, b| {
@@ -83,7 +71,11 @@ impl BebopAllPairsState {
 
     /// The state that trades `token_in` for `token_out`. A book quoting the pair as given beats
     /// one quoting it the other way round.
-    fn pair(&self, token_in: &Bytes, token_out: &Bytes) -> Result<&BebopState, SimulationError> {
+    fn pair_state(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<&BebopState, SimulationError> {
         self.find(token_in, token_out)
             .or_else(|| self.find(token_out, token_in))
             .ok_or_else(|| {
@@ -95,7 +87,9 @@ impl BebopAllPairsState {
 
     fn check_unused(&self) -> Result<(), SimulationError> {
         if self.used {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
+            return Err(SimulationError::RecoverableError(
+                "Bebop already quoted in this route".into(),
+            ));
         }
         Ok(())
     }
@@ -105,6 +99,20 @@ impl BebopAllPairsState {
     }
 }
 
+/// The token at `address`. Fails when `tokens` does not carry it: the client filters books to its
+/// tokens, so an unknown token means corrupt data.
+fn book_token(tokens: &HashMap<Bytes, Token>, address: &[u8]) -> Result<Token, SimulationError> {
+    tokens
+        .get(&Bytes::from(address.to_vec()))
+        .cloned()
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!(
+                "Bebop book names token 0x{}, which the state does not carry",
+                hex::encode(address)
+            ))
+        })
+}
+
 #[typetag::serde]
 impl ProtocolSim for BebopAllPairsState {
     fn fee(&self) -> f64 {
@@ -112,9 +120,9 @@ impl ProtocolSim for BebopAllPairsState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let pair = self.pair(&base.address, &quote.address)?;
+        let pair_state = self.pair_state(&base.address, &quote.address)?;
         self.check_unused()?;
-        pair.spot_price(base, quote)
+        pair_state.spot_price(base, quote)
     }
 
     fn get_amount_out(
@@ -123,15 +131,15 @@ impl ProtocolSim for BebopAllPairsState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let pair = self.pair(&token_in.address, &token_out.address)?;
+        let pair_state = self.pair_state(&token_in.address, &token_out.address)?;
         self.check_unused()?;
         // The per-pair state compares whole tokens, so it gets its own.
-        let (token_in, token_out) = if pair.base_token.address == token_in.address {
-            (&pair.base_token, &pair.quote_token)
+        let (token_in, token_out) = if pair_state.base_token.address == token_in.address {
+            (&pair_state.base_token, &pair_state.quote_token)
         } else {
-            (&pair.quote_token, &pair.base_token)
+            (&pair_state.quote_token, &pair_state.base_token)
         };
-        match pair.get_amount_out(amount_in, token_in, token_out) {
+        match pair_state.get_amount_out(amount_in, token_in, token_out) {
             Ok(mut res) => {
                 res.new_state = Box::new(self.used_state());
                 Ok(res)
@@ -149,9 +157,9 @@ impl ProtocolSim for BebopAllPairsState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let pair = self.pair(&sell_token, &buy_token)?;
+        let pair_state = self.pair_state(&sell_token, &buy_token)?;
         self.check_unused()?;
-        pair.get_limits(sell_token, buy_token)
+        pair_state.get_limits(sell_token, buy_token)
     }
 
     fn delta_transition(
@@ -201,7 +209,7 @@ impl IndicativelyPriced for BebopAllPairsState {
         &self,
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
-        self.pair(&params.token_in, &params.token_out)?
+        self.pair_state(&params.token_in, &params.token_out)?
             .request_signed_quote(params)
             .await
     }
@@ -287,7 +295,7 @@ mod tests {
         let state = create_test_bebop_state().used_state();
         let result = state.get_limits(wbtc().address, usdc().address);
         assert!(
-            matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+            matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "Bebop already quoted in this route")
         );
     }
 
@@ -332,11 +340,11 @@ mod tests {
 
         let second = after_first.get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc());
         assert!(
-            matches!(second, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+            matches!(second, Err(SimulationError::RecoverableError(msg)) if msg == "Bebop already quoted in this route")
         );
         let spot_price = after_first.spot_price(&wbtc(), &usdc());
         assert!(
-            matches!(spot_price, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+            matches!(spot_price, Err(SimulationError::RecoverableError(msg)) if msg == "Bebop already quoted in this route")
         );
     }
 }

@@ -214,8 +214,8 @@ impl AllMakerPriceLevels {
     /// The pair's price levels that still quote: those with levels whose maker the quote rule
     /// allows.
     ///
-    /// A pair no maker quotes is an invalid input. A pair with no price levels left has no
-    /// liquidity.
+    /// A pair no maker quotes is an invalid input. A pair whose makers with levels the quote rule
+    /// all refuse already quoted in this route. A pair with no levels has no liquidity.
     fn quotable_price_levels(
         &self,
         token_in: &Bytes,
@@ -229,13 +229,24 @@ impl AllMakerPriceLevels {
             ));
         }
         let mut price_levels = Vec::new();
+        let mut refused_by_rule = false;
         for maker_levels in pair_price_levels {
-            if !maker_levels.levels.is_empty() &&
-                self.rule
-                    .allows(&self.used_market_makers, &maker_levels.market_maker)
+            if maker_levels.levels.is_empty() {
+                continue;
+            }
+            if self
+                .rule
+                .allows(&self.used_market_makers, &maker_levels.market_maker)
             {
                 price_levels.push(maker_levels);
+            } else {
+                refused_by_rule = true;
             }
+        }
+        if price_levels.is_empty() && refused_by_rule {
+            return Err(SimulationError::RecoverableError(format!(
+                "Every market maker on {token_in} -> {token_out} already quoted in this route"
+            )));
         }
         if price_levels.is_empty() {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
@@ -517,7 +528,7 @@ mod tests {
                 .with_used("test_mm_2");
             let result = price_levels.spot_price(&weth().address, &usdc().address);
             assert!(
-                matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+                matches!(result, Err(SimulationError::RecoverableError(msg)) if msg.contains("already quoted in this route"))
             );
         }
 
@@ -567,7 +578,7 @@ mod tests {
                 &usdc().address,
             );
             assert!(
-                matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+                matches!(result, Err(SimulationError::RecoverableError(msg)) if msg.contains("already quoted in this route"))
             );
         }
 
@@ -577,7 +588,7 @@ mod tests {
                 .with_used("test_mm_2");
             let result = weth_usdc_fill(&price_levels, weth_amount(0.5));
             assert!(
-                matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+                matches!(result, Err(SimulationError::RecoverableError(msg)) if msg.contains("already quoted in this route"))
             );
         }
 

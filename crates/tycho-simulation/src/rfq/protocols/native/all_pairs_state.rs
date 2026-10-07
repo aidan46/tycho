@@ -108,7 +108,9 @@ impl NativeAllPairsState {
     ) -> Result<&NativeState, SimulationError> {
         let state = self.pair_state(token_in, token_out)?;
         if self.used {
-            return Err(SimulationError::RecoverableError("No liquidity".to_string()));
+            return Err(SimulationError::RecoverableError(
+                "Native already quoted in this route".to_string(),
+            ));
         }
         Ok(state)
     }
@@ -281,15 +283,15 @@ mod tests {
         assert!(after_first.used);
         assert!(matches!(
             after_first.get_amount_out(BigUint::from(1_000_000_000u64), &usdc(), &weth()),
-            Err(SimulationError::RecoverableError(message)) if message == "No liquidity"
+            Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
         assert!(matches!(
             after_first.spot_price(&weth(), &usdc()),
-            Err(SimulationError::RecoverableError(message)) if message == "No liquidity"
+            Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
         assert!(matches!(
             after_first.get_limits(weth().address, usdc().address),
-            Err(SimulationError::RecoverableError(message)) if message == "No liquidity"
+            Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
     }
 
