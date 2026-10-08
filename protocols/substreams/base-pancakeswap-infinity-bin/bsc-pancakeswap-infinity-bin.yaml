@@ -50,6 +50,7 @@ modules:
     kind: map
     initialBlock: 47214336
     inputs:
+      - params: string
       - source: sf.ethereum.type.v2.Block
       - store: store_pools
     output:
@@ -114,3 +115,4 @@ params:
   # manifests.
   map_pools_created: "pool_manager=C697d2898e0D09264376196696c51D7aBbbAA4a9&vault=238a358808379702088667322f80aC48bAd5e6c4"
   map_bin_changes: "C697d2898e0D09264376196696c51D7aBbbAA4a9"
+  map_events: "C697d2898e0D09264376196696c51D7aBbbAA4a9"

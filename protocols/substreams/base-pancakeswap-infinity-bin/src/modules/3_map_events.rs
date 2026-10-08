@@ -28,9 +28,11 @@ use substreams_helper::hex::Hexable;
 /// sorted.
 #[substreams::handlers::map]
 pub fn map_events(
+    params: String,
     block: eth::Block,
     pools_store: StoreGetProto<Pool>,
 ) -> Result<Events, anyhow::Error> {
+    let pool_manager = hex::decode(&params).expect("pool manager is hex");
     let mut pool_manager_events = block
         .transaction_traces
         .into_iter()
@@ -44,7 +46,7 @@ pub fn map_events(
             receipt
                 .logs
                 .iter()
-                .filter_map(|log| log_to_event(log, &tx, &pools_store))
+                .filter_map(|log| log_to_event(log, &tx, &pool_manager, &pools_store))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -54,16 +56,15 @@ pub fn map_events(
     Ok(Events { pool_events: pool_manager_events })
 }
 
-/// Resolves the pool the log belongs to and wraps the decoded payload.
-///
-/// The store lookup drops unknown pools, which is also what keeps other managers' events out: a
-/// pool id hashes its `poolManager`, so a CL pool id is never in this store.
+/// Resolves the pool the log belongs to and wraps the decoded payload. `decode_log` already
+/// rejected other emitters, so an unknown pool id here was filtered out at creation.
 fn log_to_event(
     log: &Log,
     tx: &TransactionTrace,
+    pool_manager: &[u8],
     pools_store: &StoreGetProto<Pool>,
 ) -> Option<PoolEvent> {
-    let (pool_id, event) = decode_log(log)?;
+    let (pool_id, event) = decode_log(log, pool_manager)?;
     let pool = pools_store.get_last(format!("pool:{pool_id}"))?;
 
     Some(PoolEvent {
@@ -80,7 +81,10 @@ fn log_to_event(
 ///
 /// `Initialize` is decoded here as well as in `1_map_pool_created` because `store_active_id` seeds
 /// the active bin from it.
-fn decode_log(log: &Log) -> Option<(String, Type)> {
+fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(String, Type)> {
+    if log.address != pool_manager {
+        return None;
+    }
     if let Some(init) = Initialize::match_and_decode(log) {
         Some((
             init.id.to_vec().to_hex(),
@@ -160,6 +164,7 @@ mod tests {
 
     const POOL_ID: [u8; 32] = [0xab; 32];
     const SENDER: [u8; 20] = [0x11; 20];
+    const POOL_MANAGER: [u8; 20] = [0xc6; 20];
 
     fn topic(signature: &str) -> Vec<u8> {
         let mut hasher = Keccak::v256();
@@ -186,7 +191,7 @@ mod tests {
         topics.extend(indexed.iter().cloned());
 
         Log {
-            address: Vec::new(),
+            address: POOL_MANAGER.to_vec(),
             topics,
             data: data.concat(),
             index: 0,
@@ -207,7 +212,7 @@ mod tests {
             vec![word(0), word(7), parameters, word(8_388_608)],
         );
 
-        let (pool_id, event) = decode_log(&log).expect("Initialize decodes");
+        let (pool_id, event) = decode_log(&log, &POOL_MANAGER).expect("Initialize decodes");
 
         assert_eq!(pool_id, POOL_ID.to_vec().to_hex());
         let Type::Initialize(init) = event else { panic!("wrong event type") };
@@ -225,11 +230,23 @@ mod tests {
             vec![word(1_000), negative, word(8_388_607), word(7), word(0)],
         );
 
-        let (_, event) = decode_log(&log).expect("Swap decodes");
+        let (_, event) = decode_log(&log, &POOL_MANAGER).expect("Swap decodes");
 
         let Type::Swap(swap) = event else { panic!("wrong event type") };
         assert_eq!((swap.amount0.as_str(), swap.amount1.as_str()), ("1000", "-2"));
         assert_eq!(swap.active_id, 8_388_607);
+    }
+
+    #[test]
+    fn foreign_emitter_is_skipped() {
+        let mut log = log(
+            "Swap(bytes32,address,int128,int128,uint24,uint24,uint16)",
+            &[POOL_ID.to_vec(), padded(&SENDER)],
+            vec![word(1_000), word(0), word(8_388_607), word(7), word(0)],
+        );
+        log.address = vec![0x77; 20];
+
+        assert!(decode_log(&log, &POOL_MANAGER).is_none(), "only the pool manager's logs count");
     }
 
     /// Only the six BinPoolManager events decode; everything else in a block is skipped.
@@ -239,6 +256,9 @@ mod tests {
     fn unrelated_logs_are_skipped(#[case] signature: &str) {
         let log = log(signature, &[POOL_ID.to_vec(), padded(&SENDER)], vec![word(0)]);
 
-        assert!(decode_log(&log).is_none(), "{signature} must not decode as a Bin event");
+        assert!(
+            decode_log(&log, &POOL_MANAGER).is_none(),
+            "{signature} must not decode as a Bin event"
+        );
     }
 }
