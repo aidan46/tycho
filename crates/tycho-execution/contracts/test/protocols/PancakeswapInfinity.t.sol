@@ -230,8 +230,8 @@ contract PancakeswapInfinityExecutorTest is Constants, TestUtils {
 /**
  * Router-level setup check: the executor deploys and is whitelisted with the others in
  * TychoRouterTestSetup.deployExecutors, at the deterministic address committed in
- * config/test_executor_addresses.json under both "pancakeswap_infinity_cl" and
- * "pancakeswap_infinity_bin" on "base": one executor serves both pool types.
+ * config/test_executor_addresses.json under "pancakeswap_infinity_cl"; the Rust registry
+ * resolves "pancakeswap_infinity_bin" to the same executor, so there is no second entry.
  */
 contract TychoRouterForPancakeswapInfinityTest is TychoRouterTestSetup {
     function getChain() public pure override returns (string memory) {
