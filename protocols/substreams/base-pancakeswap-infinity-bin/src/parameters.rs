@@ -81,30 +81,42 @@ pub fn pool_state_base_slot(pool_id: &[u8; 32], mapping_slot: u8) -> [u8; 32] {
     out
 }
 
-/// Slot holding `reserveOfBin[bin_id]` for the pool whose struct starts at `base`.
+/// Slot of `mapping[key]` for the mapping stored `offset` slots after `base`.
 ///
-/// `reserveOfBin` is the mapping at `base + 1`; Solidity stores `mapping[k]` at
+/// `base` is a hash, so the offset can carry out of the low byte. Solidity stores `mapping[k]` at
 /// `keccak256(pad32(k) ++ pad32(slot))`:
 /// <https://docs.soliditylang.org/en/latest/internals/layout_in_storage.html#mappings-and-dynamic-arrays>
-pub fn bin_reserve_slot(base: &[u8; 32], bin_id: u32) -> [u8; 32] {
-    // base is a hash, so `+1` can carry out of the low byte. Add over the full word.
+fn mapping_slot(base: &[u8; 32], offset: u8, key: u32) -> [u8; 32] {
     let mut slot = *base;
+    let mut carry = offset;
     for byte in slot.iter_mut().rev() {
-        let (next, carried) = byte.overflowing_add(1);
+        let (next, overflowed) = byte.overflowing_add(carry);
         *byte = next;
-        if !carried {
+        if !overflowed {
             break;
         }
+        carry = 1;
     }
-    let mut key = [0u8; 32];
-    key[28..].copy_from_slice(&bin_id.to_be_bytes());
+    let mut padded = [0u8; 32];
+    padded[28..].copy_from_slice(&key.to_be_bytes());
 
     let mut hasher = Keccak::v256();
-    hasher.update(&key);
+    hasher.update(&padded);
     hasher.update(&slot);
     let mut out = [0u8; 32];
     hasher.finalize(&mut out);
     out
+}
+
+/// Slot holding `reserveOfBin[bin_id]`, the mapping at `base + 1`.
+pub fn bin_reserve_slot(base: &[u8; 32], bin_id: u32) -> [u8; 32] {
+    mapping_slot(base, 1, bin_id)
+}
+
+/// Slot holding `level2[segment]`, the bin tree leaf word at `base + 6`. `segment` is
+/// `bin_id >> 8`; bit `bin_id & 0xff` of the word says whether the bin is in the tree.
+pub fn tree_level2_slot(base: &[u8; 32], segment: u32) -> [u8; 32] {
+    mapping_slot(base, 6, segment)
 }
 
 /// Splits a packed `reserveOfBin` word into `(reserve_x, reserve_y)`.
@@ -209,6 +221,28 @@ mod tests {
     #[case::above(ACTIVE_ID + 1, "57f1ce7c1719cfe09156165c1e7de5293f9b9a2d22f5837ec9d15c7bf9ff0234")]
     fn test_bin_reserve_slot_matches_chain(#[case] bin_id: u32, #[case] expected: &str) {
         assert_eq!(hex::encode(bin_reserve_slot(&base_slot(), bin_id)), expected);
+    }
+
+    /// `level2[ACTIVE_ID >> 8]` for the same pool. At this slot BinPoolManager on BNB holds
+    /// `0xfffffffe00..00`, bits 225..=255 set, and `ACTIVE_ID & 0xff` is 252.
+    #[test]
+    fn test_tree_level2_slot_matches_chain() {
+        assert_eq!(
+            hex::encode(tree_level2_slot(&base_slot(), ACTIVE_ID >> 8)),
+            "bdbb39840772b2cdf39b8a51a1907990363daef629b456e80b44d55770e4e309"
+        );
+    }
+
+    /// The offset is added once, then only a carry of one propagates.
+    #[test]
+    fn test_mapping_slot_carries_offset_once() {
+        let mut base = [0u8; 32];
+        base[31] = 0xfb;
+        let mut expected = [0u8; 32];
+        expected[31] = 0x01;
+        expected[30] = 0x01;
+        // Same hash input as a base that already sits at the carried value with offset 0.
+        assert_eq!(mapping_slot(&base, 6, 7), mapping_slot(&expected, 0, 7));
     }
 
     /// Only Y below the active bin, only X above. Pins which half is which.

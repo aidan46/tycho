@@ -21,9 +21,9 @@ use substreams_helper::hex::Hexable;
 /// just fee growth, so skipping it would drift balances.
 ///
 /// `Mint` and `Burn` keep only `ids[]`. The packed `amounts[]` are ignored because
-/// `5_map_bin_changes` reads the resulting reserves from storage instead.
+/// `6_map_bin_changes` reads the resulting reserves from storage instead.
 ///
-/// Ordinals are load-bearing: `5_map_bin_changes` joins these events to storage writes and to
+/// Ordinals are load-bearing: `6_map_bin_changes` joins these events to storage writes and to
 /// `store_active_id` by ordinal, so `log_ordinal` must be the log's own and the output must stay
 /// sorted.
 #[substreams::handlers::map]

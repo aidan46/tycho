@@ -14,13 +14,19 @@ pub mod map_events;
 #[path = "4_store_active_id.rs"]
 pub mod store_active_id;
 
-#[path = "5_map_bin_changes.rs"]
+#[path = "4_map_tree_changes.rs"]
+pub mod map_tree_changes;
+
+#[path = "5_store_bin_trees.rs"]
+pub mod store_bin_trees;
+
+#[path = "6_map_bin_changes.rs"]
 pub mod map_bin_changes;
 
-#[path = "5_map_store_balance_changes.rs"]
+#[path = "6_map_store_balance_changes.rs"]
 pub mod map_store_balance_changes;
 
-#[path = "6_map_protocol_changes.rs"]
+#[path = "7_map_protocol_changes.rs"]
 pub mod map_protocol_changes;
 
 impl From<TransactionTrace> for Transaction {

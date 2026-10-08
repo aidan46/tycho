@@ -28,7 +28,7 @@ in Bin it moves real reserves rather than only fee growth.
 
 ```bash
 cd protocols/substreams
-substreams protogen base-pancakeswap-infinity-bin/base-pancakeswap-infinity-bin.yaml --exclude-paths="google"
+substreams protogen base-pancakeswap-infinity-bin/base-pancakeswap-infinity-bin.yaml --exclude-paths="sf,google,tycho"
 cargo build --package base-pancakeswap-infinity-bin --target wasm32-unknown-unknown --release
 cargo test --package base-pancakeswap-infinity-bin
 cd base-pancakeswap-infinity-bin

@@ -56,6 +56,16 @@ modules:
     output:
       type: proto:pancakeswap.infinity.bin.Events
 
+  - name: map_tree_changes
+    kind: map
+    initialBlock: 30544163
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_events
+    output:
+      type: proto:pancakeswap.infinity.bin.TreeDeltas
+
   - name: store_active_id
     kind: store
     initialBlock: 30544163
@@ -63,6 +73,14 @@ modules:
     valueType: int64
     inputs:
       - map: map_events
+
+  - name: store_bin_trees
+    kind: store
+    initialBlock: 30544163
+    updatePolicy: set
+    valueType: bytes
+    inputs:
+      - map: map_tree_changes
 
   # Needs the raw Block for storage diffs, and store_active_id in `get` mode (not deltas) so it
   # can ask for the value as of a specific log ordinal.
@@ -75,6 +93,7 @@ modules:
       - source: sf.ethereum.type.v2.Block
       - map: map_events
       - store: store_active_id
+      - store: store_bin_trees
     output:
       type: proto:pancakeswap.infinity.bin.BinDeltas
 
@@ -116,3 +135,4 @@ params:
   map_pools_created: "pool_manager=C697d2898e0D09264376196696c51D7aBbbAA4a9&vault=238a358808379702088667322f80aC48bAd5e6c4"
   map_bin_changes: "C697d2898e0D09264376196696c51D7aBbbAA4a9"
   map_events: "C697d2898e0D09264376196696c51D7aBbbAA4a9"
+  map_tree_changes: "C697d2898e0D09264376196696c51D7aBbbAA4a9"

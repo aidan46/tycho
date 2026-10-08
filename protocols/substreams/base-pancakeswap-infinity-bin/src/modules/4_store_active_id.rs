@@ -9,7 +9,7 @@ use crate::pb::pancakeswap::infinity::bin::{
 ///
 /// Writes at the LOG ordinal, never 0, so a reader can ask for the state as of any log in the
 /// block. A Bin `Swap` reports only the active bin AFTER the swap, and `get_at` includes the write
-/// at the ordinal it is given, so `5_map_bin_changes` reads one ordinal below the swap's log to
+/// at the ordinal it is given, so `6_map_bin_changes` reads one ordinal below the swap's log to
 /// recover the pre-swap bin.
 #[substreams::handlers::store]
 pub fn store_active_id(events: Events, store: StoreSetInt64) {
@@ -92,7 +92,7 @@ mod tests {
     }
 
     /// Only `Initialize` and `Swap` move the active bin. Mint, Burn and Donate touch bins without
-    /// moving it, and recording them would overwrite the pre-swap value `5_map_bin_changes` reads
+    /// moving it, and recording them would overwrite the pre-swap value `6_map_bin_changes` reads
     /// back at a swap's ordinal.
     #[rstest]
     #[case::initialize(initialize(8_388_608), Some(8_388_608))]
@@ -108,7 +108,7 @@ mod tests {
         assert_eq!(active_id.map(|(_, _, id)| id), expected);
     }
 
-    /// The write goes at the log's ordinal, never 0, so `5_map_bin_changes` can read the state as
+    /// The write goes at the log's ordinal, never 0, so `6_map_bin_changes` can read the state as
     /// of the log before a swap. A write at 0 would return the block's final value for every read.
     #[test]
     fn writes_at_the_log_ordinal() {

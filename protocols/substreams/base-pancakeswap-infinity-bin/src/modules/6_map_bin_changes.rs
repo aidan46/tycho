@@ -6,12 +6,8 @@ use crate::{
     },
 };
 use std::collections::HashMap;
-use substreams::store::{StoreGet, StoreGetInt64};
-use substreams_ethereum::pb::eth::v2::{self as eth, Call, StorageChange};
-
-/// The bin tree only visits non-empty bins, so no real swap comes near this. Turns an active-id
-/// bookkeeping bug into a fast failure instead of a 16M-iteration loop.
-const MAX_SWAP_BIN_SPAN: u64 = 65_536;
+use substreams::store::{StoreGet, StoreGetInt64, StoreGetRaw};
+use substreams_ethereum::pb::eth::v2::{self as eth, StorageChange};
 
 /// Absolute per-bin reserves, read out of BinPoolManager storage diffs.
 ///
@@ -24,34 +20,11 @@ pub fn map_bin_changes(
     block: eth::Block,
     events: Events,
     active_id_store: StoreGetInt64,
+    bin_trees_store: StoreGetRaw,
 ) -> Result<BinDeltas, substreams::errors::Error> {
     let pool_manager = hex::decode(&params).expect("pool manager is hex");
 
-    // Per transaction, because two transactions in one block can write the same bin. Every write
-    // kept, not just the last: one transaction can mint into a bin then swap through it, which is
-    // two events needing two before/after pairs.
-    let mut writes_by_tx: HashMap<u64, HashMap<Vec<u8>, Vec<&StorageChange>>> = HashMap::new();
-    for tx in block
-        .transaction_traces
-        .iter()
-        .filter(|tx| tx.status == 1)
-    {
-        let slots = writes_by_tx
-            .entry(u64::from(tx.index))
-            .or_default();
-        for change in tx
-            .calls
-            .iter()
-            .filter(|call: &&Call| !call.state_reverted)
-            .flat_map(|call| call.storage_changes.iter())
-            .filter(|change| change.address == pool_manager)
-        {
-            slots
-                .entry(change.key.clone())
-                .or_default()
-                .push(change);
-        }
-    }
+    let writes_by_tx = super::map_tree_changes::storage_writes_by_tx(&block, &pool_manager);
 
     let no_writes = HashMap::new();
     let mut deltas: Vec<BinDelta> = Vec::new();
@@ -68,21 +41,38 @@ pub fn map_bin_changes(
         let writes = writes_by_tx
             .get(&tx_index)
             .unwrap_or(&no_writes);
-        let pre_active_id = match event.r#type.as_ref().unwrap() {
-            pool_event::Type::Swap(..) => {
-                pre_swap_active_id(&active_id_store, &event.pool_id, event.log_ordinal)
+        let swap_bins = match event.r#type.as_ref().unwrap() {
+            pool_event::Type::Swap(swap) => {
+                let post = swap.active_id;
+                // Missing only if no Initialize or Swap preceded this log for the pool.
+                let pre = pre_swap_active_id(&active_id_store, &event.pool_id, event.log_ordinal)
+                    .unwrap_or(post);
+                let (low, high) = (pre.min(post), pre.max(post));
+                let mut bins = tree_bins_between(
+                    &bin_trees_store,
+                    event.pool_id.trim_start_matches("0x"),
+                    low,
+                    high,
+                    event.log_ordinal,
+                );
+                // The active bin is swapped through even when a burn left it out of the tree, and
+                // the post bin is where the walk stopped: both are visited whatever the tree says.
+                bins.extend([pre, post]);
+                bins.sort_unstable();
+                bins.dedup();
+                bins
             }
-            _ => None,
+            _ => Vec::new(),
         };
         let floor = prev_log
             .get(&tx_index)
             .copied()
             .unwrap_or(0);
-        deltas.extend(event_to_deltas(event, writes, pre_active_id, floor)?);
+        deltas.extend(event_to_deltas(event, writes, swap_bins, floor)?);
         prev_log.insert(tx_index, event.log_ordinal);
     }
 
-    // Deterministic for the join in 6_map_protocol_changes.
+    // Deterministic for the join in 7_map_protocol_changes.
     deltas.sort_unstable_by_key(|delta| (delta.ordinal, delta.bin_id));
 
     Ok(BinDeltas { deltas })
@@ -99,15 +89,51 @@ fn pre_swap_active_id<S: StoreGet<i64>>(store: &S, pool_id: &str, log_ordinal: u
         .map(|id| id as u32)
 }
 
+/// Tree bins in `[low, high]`, ascending, as of the log before `log_ordinal`.
+///
+/// One `level2` word per segment of 256 bins: bit `id & 0xff` of word `id >> 8` is set when the
+/// bin is in the tree. A segment the store has never seen holds no bins.
+fn tree_bins_between<S: StoreGet<Vec<u8>>>(
+    store: &S,
+    pool_id: &str,
+    low: u32,
+    high: u32,
+    log_ordinal: u64,
+) -> Vec<u32> {
+    let mut bins = Vec::new();
+    for segment in (low >> 8)..=(high >> 8) {
+        let Some(word) =
+            store.get_at(log_ordinal.saturating_sub(1), format!("tree:{pool_id}:{segment}"))
+        else {
+            continue;
+        };
+        for bit in set_bits(&word) {
+            let id = (segment << 8) | bit;
+            if (low..=high).contains(&id) {
+                bins.push(id);
+            }
+        }
+    }
+    bins
+}
+
+/// Positions of the set bits in a big-endian 256-bit word, ascending.
+fn set_bits(word: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    (0..256u32).filter(move |bit| {
+        let byte = word[31 - (bit / 8) as usize];
+        byte & (1 << (bit % 8)) != 0
+    })
+}
+
 /// Bins one event touched. `bin_id` comes from the event, the packed reserves from the storage
 /// write at `bin_reserve_slot`.
 ///
-/// `pre_active_id`: active bin immediately before this event, `None` if the store has no value.
-/// Swaps only.
+/// `swap_bins`: the bins a swap visited, from the tree between its start and end. Empty for
+/// every other event, which names its bins itself.
 fn event_to_deltas(
     event: &PoolEvent,
     writes: &HashMap<Vec<u8>, Vec<&StorageChange>>,
-    pre_active_id: Option<u32>,
+    swap_bins: Vec<u32>,
     prev_log_ordinal: u64,
 ) -> Result<Vec<BinDelta>, substreams::errors::Error> {
     // Raw 32 bytes, not `pool_id.as_bytes()`, which is UTF-8 of the "0x..." string.
@@ -133,26 +159,7 @@ fn event_to_deltas(
         pool_event::Type::Mint(mint) => (mint.ids.clone(), true),
         pool_event::Type::Burn(burn) => (burn.ids.clone(), true),
         pool_event::Type::Donate(donate) => (vec![donate.bin_id], true),
-        pool_event::Type::Swap(swap) => {
-            let post = swap.active_id;
-            // Missing only if no Initialize or Swap preceded this log for the pool.
-            let pre = pre_active_id.unwrap_or(post);
-
-            // Ordered: `a..=b` is empty when a > b, dropping every downward swap.
-            let (low, high) = (pre.min(post), pre.max(post));
-            let span = u64::from(high - low) + 1;
-            if span > MAX_SWAP_BIN_SPAN {
-                return Err(anyhow::anyhow!(
-                    "pool {} swap at ordinal {} spans {} bins, {} to {}",
-                    event.pool_id,
-                    event.log_ordinal,
-                    span,
-                    low,
-                    high
-                ));
-            }
-            ((low..=high).collect(), false)
-        }
+        pool_event::Type::Swap(..) => (swap_bins, false),
     };
 
     let mut deltas = Vec::with_capacity(bin_ids.len());
@@ -194,7 +201,8 @@ fn event_to_deltas(
                     event.log_ordinal
                 ))
             }
-            // Swap range only: bin was empty, never written.
+            // Swap only: a tree bin the walk did not write. Not expected, but the tree is read
+            // one log behind, so tolerate it rather than halt.
             None => {}
         }
     }
@@ -278,7 +286,7 @@ mod tests {
             write(102, packed(0, 0), packed(12, 22), 3),
         ];
         let deltas =
-            event_to_deltas(&event(mint(vec![100, 101, 102]), 9), &index(&changes), None, 0)
+            event_to_deltas(&event(mint(vec![100, 101, 102]), 9), &index(&changes), Vec::new(), 0)
                 .unwrap();
 
         assert_eq!(deltas.len(), 3);
@@ -296,47 +304,29 @@ mod tests {
             write(100, packed(0, 0), packed(10, 20), 1),
             write(102, packed(0, 0), packed(12, 22), 3),
         ];
-        let err = event_to_deltas(&event(mint(vec![100, 101, 102]), 9), &index(&changes), None, 0)
-            .unwrap_err()
-            .to_string();
+        let err =
+            event_to_deltas(&event(mint(vec![100, 101, 102]), 9), &index(&changes), Vec::new(), 0)
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("bin 101"), "{err}");
     }
 
-    /// Range is a guess; unwritten bins were empty.
+    /// A tree bin the swap did not write is unexpected but not a layout break.
     #[test]
-    fn swap_skips_unwritten_bins_in_its_range() {
+    fn swap_skips_unwritten_bins() {
         let changes = vec![
             write(5, packed(5, 0), packed(4, 1), 1),
             write(6, packed(6, 0), packed(3, 2), 2),
             write(8, packed(8, 0), packed(2, 3), 3),
         ];
-        let deltas = event_to_deltas(&event(swap(8), 9), &index(&changes), Some(5), 0).unwrap();
+        let deltas =
+            event_to_deltas(&event(swap(8), 9), &index(&changes), vec![5, 6, 7, 8], 0).unwrap();
 
         let bins: Vec<u32> = deltas
             .iter()
             .map(|d| d.bin_id)
             .collect();
         assert_eq!(bins, vec![5, 6, 8], "bin 7 was empty, not an error");
-    }
-
-    /// `a..=b` is empty when a > b, so an unordered range drops every downward swap.
-    #[test]
-    fn swap_range_is_ordered_in_both_directions() {
-        let changes = vec![
-            write(5, packed(5, 0), packed(4, 1), 1),
-            write(6, packed(6, 0), packed(3, 2), 2),
-            write(8, packed(8, 0), packed(2, 3), 3),
-        ];
-        let up = event_to_deltas(&event(swap(8), 9), &index(&changes), Some(5), 0).unwrap();
-        let down = event_to_deltas(&event(swap(5), 9), &index(&changes), Some(8), 0).unwrap();
-
-        let bins = |d: &[BinDelta]| {
-            d.iter()
-                .map(|x| x.bin_id)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(bins(&up), bins(&down));
-        assert_eq!(bins(&down), vec![5, 6, 8]);
     }
 
     /// Two events in one tx writing the same bin need their own pairs, else balances double-count.
@@ -348,11 +338,11 @@ mod tests {
         ];
         let writes = index(&changes);
 
-        let minted = event_to_deltas(&event(mint(vec![100]), 5), &writes, None, 0).unwrap();
+        let minted = event_to_deltas(&event(mint(vec![100]), 5), &writes, Vec::new(), 0).unwrap();
         assert_eq!(minted[0].old_packed, packed(0, 0));
         assert_eq!(minted[0].new_packed, packed(10, 10));
 
-        let swapped = event_to_deltas(&event(swap(100), 15), &writes, Some(100), 5).unwrap();
+        let swapped = event_to_deltas(&event(swap(100), 15), &writes, vec![100], 5).unwrap();
         assert_eq!(swapped[0].old_packed, packed(10, 10), "must not reuse the mint's pair");
         assert_eq!(swapped[0].new_packed, packed(7, 13));
     }
@@ -419,6 +409,84 @@ mod tests {
         assert_eq!(pre_swap_active_id(&store, &format!("0x{POOL_ID}"), 9), None);
     }
 
+    /// `FakeStore` for the raw tree words.
+    struct FakeRawStore(Vec<(u64, String, Vec<u8>)>);
+
+    impl StoreGet<Vec<u8>> for FakeRawStore {
+        fn new(_idx: u32) -> Self {
+            Self(Vec::new())
+        }
+
+        fn get_at<K: AsRef<str>>(&self, ord: u64, key: K) -> Option<Vec<u8>> {
+            self.0
+                .iter()
+                .filter(|(written_at, written_key, _)| {
+                    *written_at <= ord && written_key == key.as_ref()
+                })
+                .max_by_key(|(written_at, _, _)| *written_at)
+                .map(|(_, _, value)| value.clone())
+        }
+
+        fn get_last<K: AsRef<str>>(&self, _key: K) -> Option<Vec<u8>> {
+            unimplemented!("tests only read at an ordinal")
+        }
+
+        fn get_first<K: AsRef<str>>(&self, _key: K) -> Option<Vec<u8>> {
+            unimplemented!("tests only read at an ordinal")
+        }
+
+        fn has_at<K: AsRef<str>>(&self, _ord: u64, _key: K) -> bool {
+            unimplemented!("tests only read at an ordinal")
+        }
+
+        fn has_last<K: AsRef<str>>(&self, _key: K) -> bool {
+            unimplemented!("tests only read at an ordinal")
+        }
+
+        fn has_first<K: AsRef<str>>(&self, _key: K) -> bool {
+            unimplemented!("tests only read at an ordinal")
+        }
+    }
+
+    /// A `level2` word with one bin set, laid out as the contract stores it.
+    fn tree_word(id: u32) -> Vec<u8> {
+        let mut word = vec![0u8; 32];
+        word[31 - ((id & 0xff) / 8) as usize] |= 1 << ((id & 0xff) % 8);
+        word
+    }
+
+    /// The chain word for segment 32767 of the parameters test pool: bits 225..=255 set.
+    #[test]
+    fn set_bits_reads_big_endian() {
+        let mut word = vec![0u8; 32];
+        word[..4].copy_from_slice(&[0xff, 0xff, 0xff, 0xfe]);
+
+        assert_eq!(set_bits(&word).collect::<Vec<_>>(), (225..=255).collect::<Vec<_>>());
+    }
+
+    /// Only tree bins between the ends count, whatever the gap, and both ends are clipped.
+    #[test]
+    fn tree_bins_between_walks_the_tree_not_the_id_range() {
+        let (low, mid, high) = (1_000, 40_000, 80_000);
+        let store = FakeRawStore(vec![
+            (1, format!("tree:{POOL_ID}:{}", low >> 8), tree_word(low)),
+            (1, format!("tree:{POOL_ID}:{}", mid >> 8), tree_word(mid)),
+            (1, format!("tree:{POOL_ID}:{}", high >> 8), tree_word(high)),
+        ]);
+
+        assert_eq!(tree_bins_between(&store, POOL_ID, low, high, 9), vec![low, mid, high]);
+        assert_eq!(tree_bins_between(&store, POOL_ID, low + 1, high - 1, 9), vec![mid]);
+    }
+
+    /// A mint at the swap's own ordinal is a later log; one just before it must be visible.
+    #[test]
+    fn tree_bins_between_reads_the_state_before_this_log() {
+        let key = format!("tree:{POOL_ID}:0");
+        let store = FakeRawStore(vec![(8, key.clone(), tree_word(5)), (9, key, tree_word(6))]);
+
+        assert_eq!(tree_bins_between(&store, POOL_ID, 0, 255, 9), vec![5]);
+    }
+
     /// An earlier event's write in the same tx must not be replayed as this swap's pair, or the
     /// bin's reserve is counted twice.
     #[test]
@@ -429,19 +497,10 @@ mod tests {
         ];
 
         let deltas =
-            event_to_deltas(&event(swap(100), 15), &index(&changes), Some(101), 3).unwrap();
+            event_to_deltas(&event(swap(100), 15), &index(&changes), vec![100, 101], 3).unwrap();
 
         assert_eq!(deltas.len(), 1, "only the swap's own write counts");
         assert_eq!(deltas[0].bin_id, 100);
-    }
-
-    /// Guards active-id bookkeeping, not any real swap.
-    #[test]
-    fn absurd_swap_span_errors() {
-        let err = event_to_deltas(&event(swap(1), 9), &index(&[]), Some(1 << 23), 0)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("spans"), "{err}");
     }
 
     /// No bins touched, no lookups.
@@ -452,7 +511,7 @@ mod tests {
             protocol_fee: 1,
         });
         assert!(
-            event_to_deltas(&event(kind, 9), &index(&[]), None, 0)
+            event_to_deltas(&event(kind, 9), &index(&[]), Vec::new(), 0)
                 .unwrap()
                 .is_empty(),
             "ProtocolFeeUpdated touches no bins, so it must yield no deltas"

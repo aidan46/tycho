@@ -25,10 +25,33 @@ pub struct Transaction {
     #[prost(uint64, tag="4")]
     pub index: u64,
 }
+/// One `level2` word of the bin tree after a mint or burn rewrote it: bit `id & 0xff` is set
+/// when bin `(segment << 8) | bit` is in the tree, which is what the swap loop walks.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TreeDelta {
+    #[prost(bytes="vec", tag="1")]
+    pub pool_id: ::prost::alloc::vec::Vec<u8>,
+    /// `bin_id >> 8`, the key of the `level2` mapping.
+    #[prost(uint32, tag="2")]
+    pub segment: u32,
+    /// The 32-byte word as written.
+    #[prost(bytes="vec", tag="3")]
+    pub bitmap: ::prost::alloc::vec::Vec<u8>,
+    /// Log ordinal of the Mint or Burn that caused the write.
+    #[prost(uint64, tag="4")]
+    pub ordinal: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TreeDeltas {
+    #[prost(message, repeated, tag="1")]
+    pub deltas: ::prost::alloc::vec::Vec<TreeDelta>,
+}
 /// Absolute reserves of one bin, before and after a transaction touched it.
 ///
 /// Unlike CL ticks, these are NOT deltas. The events do not carry per-bin amounts, so the values
-/// are read out of the BinPoolManager storage diff (see 5_map_bin_changes.rs). Both sides are kept
+/// are read out of the BinPoolManager storage diff (see 6_map_bin_changes.rs). Both sides are kept
 /// because map_protocol_changes needs `old` to decide Creation vs Update vs Deletion, and
 /// map_balance_changes needs `new - old` to derive the token balance delta.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -110,7 +133,7 @@ pub mod events {
             pub parameters: ::prost::alloc::vec::Vec<u8>,
         }
         /// Mint and Burn carry the bin ids they touched but not the resulting reserves, so
-        /// 5_map_bin_changes.rs uses `ids` only to decide which storage slots to look up.
+        /// 6_map_bin_changes.rs uses `ids` only to decide which storage slots to look up.
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Mint {
