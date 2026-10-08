@@ -72,7 +72,7 @@ impl PancakeswapInfinityBinState {
     /// swap reverts (`BinPool__OutOfLiquidity`), so a partial fill would quote an unexecutable
     /// trade.
     ///
-    /// [`BinPool.sol#L111-L222`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/BinPool.sol#L111-L222)
+    /// [`BinPool.sol#L111-L222`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPool.sol#L111-L222)
     pub fn swap(
         &self,
         swap_for_y: bool,
@@ -178,7 +178,7 @@ impl PancakeswapInfinityBinState {
     /// Matches `findFirstRight` / `findFirstLeft`, which step off `from` before searching despite
     /// what their natspec says, because the caller has already spent that bin.
     ///
-    /// [`BinPool.sol#L293-L297`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/BinPool.sol#L293-L297)
+    /// [`BinPool.sol#L293-L297`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPool.sol#L293-L297)
     fn next_bin_with_liquidity(&self, swap_for_y: bool, from: u32) -> Option<u32> {
         if swap_for_y {
             self.bins

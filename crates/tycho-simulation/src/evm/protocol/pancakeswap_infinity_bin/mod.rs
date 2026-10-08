@@ -13,10 +13,10 @@
 //! That package indexes only pools with a static LP fee and no swap hook, so nothing here models a
 //! hook or a fee that moves mid-swap.
 //!
-//! All math is ported from `pancakeswap/infinity-core` at commit
-//! `d0e879334da8ea789a895d864dbe34259ea9fb65`; every `path:line` in this module refers to that
-//! commit. The port has to be bit-exact, rounding included: a quote that rounds one wei the
-//! other way than the pool does is a failed execution, not a rounding difference.
+//! All math is ported from `pancakeswap/infinity-core` at commit `7c04695f`, the one the
+//! deployed BinPoolManager was built from; every `path:line` in this module refers to it. The
+//! port has to be bit-exact, rounding included: a quote that rounds one wei the other way than
+//! the pool does is a failed execution, not a rounding difference.
 mod attributes;
 mod decoder;
 mod math;

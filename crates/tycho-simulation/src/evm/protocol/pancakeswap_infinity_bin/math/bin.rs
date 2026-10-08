@@ -1,7 +1,7 @@
 //! Bin prices and per-bin swap math.
 //!
-//! [`PriceHelper.sol`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/PriceHelper.sol),
-//! [`BinHelper.sol`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/BinHelper.sol).
+//! [`PriceHelper.sol`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/PriceHelper.sol),
+//! [`BinHelper.sol`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinHelper.sol).
 
 use alloy::primitives::U256;
 use tycho_common::simulation::errors::SimulationError;
@@ -17,14 +17,14 @@ use super::{
 
 /// Price ratio between neighbouring bins, `1 + bin_step / 10_000` in 128.128.
 ///
-/// [`PriceHelper.sol#L45-L49`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/PriceHelper.sol#L45-L49)
+/// [`PriceHelper.sol#L45-L49`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/PriceHelper.sol#L45-L49)
 pub fn get_base(bin_step: u16) -> U256 {
     SCALE + (U256::from(bin_step) << SCALE_OFFSET) / U256::from(BASIS_POINT_MAX)
 }
 
 /// Price of bin `id` in 128.128, y per x. Exponent is signed: bins below `2^23` price x under 1 y.
 ///
-/// [`PriceHelper.sol#L22-L27`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/PriceHelper.sol#L22-L27)
+/// [`PriceHelper.sol#L22-L27`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/PriceHelper.sol#L22-L27)
 pub fn get_price_from_id(id: u32, bin_step: u16) -> Result<U256, SimulationError> {
     pow(get_base(bin_step), id as i32 - REAL_ID_SHIFT as i32)
 }
@@ -54,7 +54,7 @@ pub struct BinAmounts {
 /// direction. Narrowing happens before the clamp: a raw output above `u128` reverts on chain
 /// rather than clamping, and a high-priced bin reaches that.
 ///
-/// [`BinHelper.sol#L267-L311`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/BinHelper.sol#L267-L311)
+/// [`BinHelper.sol#L267-L311`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinHelper.sol#L267-L311)
 pub fn get_amounts_out(
     bin_reserve_out: u128,
     swap_fee_pips: u32,
@@ -110,7 +110,7 @@ pub fn get_amounts_out(
 /// Errors where the Solidity reverts `BinHelper__LiquidityOverflow`. `swap` needs it for the
 /// `MAX_LIQUIDITY_PER_BIN` check after crediting a bin.
 ///
-/// [`BinHelper.sol#L124-L156`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/BinHelper.sol#L124-L156)
+/// [`BinHelper.sol#L124-L156`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinHelper.sol#L124-L156)
 pub fn get_liquidity(x: u128, y: u128, price: U256) -> Result<U256, SimulationError> {
     let mut liquidity = U256::ZERO;
     if x > 0 {

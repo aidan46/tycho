@@ -1,4 +1,4 @@
-//! [`Constants.sol`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/Constants.sol#L6-L18),
+//! [`Constants.sol`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/Constants.sol#L6-L18),
 //! plus the two the price and fee helpers keep private.
 
 use alloy::primitives::U256;

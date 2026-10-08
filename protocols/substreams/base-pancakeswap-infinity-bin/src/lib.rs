@@ -17,7 +17,7 @@
 //!    `UniswapV4State` cannot decode these components.
 //!
 //! Solidity references are paths in `pancakeswap/infinity-core`:
-//! <https://github.com/pancakeswap/infinity-core/tree/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin>
+//! <https://github.com/pancakeswap/infinity-core/tree/7c04695f/src/pool-bin>
 //!
 //! Attributes. Static: `pool_id`, `key_lp_fee`, `bin_step`, `parameters`, `pool_manager`,
 //! optional `hook_address`. State: `balance_owner`, `active_id`, `fee`,

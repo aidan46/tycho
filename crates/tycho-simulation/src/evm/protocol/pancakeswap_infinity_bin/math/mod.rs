@@ -1,5 +1,5 @@
 //! Bin math, ported from PancakeSwap Infinity core at commit
-//! [`d0e8793`](https://github.com/pancakeswap/infinity-core/tree/d0e879334da8ea789a895d864dbe34259ea9fb65).
+//! [`7c04695f`](https://github.com/pancakeswap/infinity-core/tree/7c04695f).
 //! Every link below pins that commit. Port is bit-exact, rounding included: one wei the wrong way
 //! is a failed swap, not a rounding difference.
 //!

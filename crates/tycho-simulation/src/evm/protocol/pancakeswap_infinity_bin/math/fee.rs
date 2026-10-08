@@ -1,9 +1,9 @@
 //! Bin fee math. Fees are pips (`1e6`); the helpers scale to `1e18` internally as
 //! `fee_pips * 1e12`, so pass pips. Pre-scaling double-scales silently.
 //!
-//! [`FeeHelper.sol`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/FeeHelper.sol),
-//! [`ProtocolFeeLibrary.sol`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/libraries/ProtocolFeeLibrary.sol),
-//! [`PackedUint128Math.sol`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/math/PackedUint128Math.sol).
+//! [`FeeHelper.sol`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/FeeHelper.sol),
+//! [`ProtocolFeeLibrary.sol`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/libraries/ProtocolFeeLibrary.sol),
+//! [`PackedUint128Math.sol`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/math/PackedUint128Math.sol).
 
 use alloy::primitives::U256;
 use tycho_common::simulation::errors::SimulationError;
@@ -14,7 +14,7 @@ use crate::evm::protocol::safe_math::{safe_add_u256, safe_mul_u256};
 /// Fee already contained in an amount, rounded up. Charged when the input is smaller than the bin
 /// can absorb.
 ///
-/// [`FeeHelper.sol#L13-L19`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/FeeHelper.sol#L13-L19)
+/// [`FeeHelper.sol#L13-L19`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/FeeHelper.sol#L13-L19)
 pub fn get_fee_amount_from(amount_with_fee: u128, fee_pips: u32) -> Result<u128, SimulationError> {
     let total_fee = U256::from(fee_pips) * U256::from(1_000_000_000_000u64);
     let numerator = safe_mul_u256(U256::from(amount_with_fee), total_fee)?;
@@ -30,7 +30,7 @@ pub fn get_fee_amount_from(amount_with_fee: u128, fee_pips: u32) -> Result<u128,
 /// Rejects fees at or above `1e6` pips: the denominator would underflow, and `fee_pips` arrives
 /// from an indexer attribute. On-chain cap is `100_000` (10%).
 ///
-/// [`FeeHelper.sol#L25-L32`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/FeeHelper.sol#L25-L32)
+/// [`FeeHelper.sol#L25-L32`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/FeeHelper.sol#L25-L32)
 pub fn get_fee_amount(amount: u128, fee_pips: u32) -> Result<u128, SimulationError> {
     if fee_pips >= 1_000_000 {
         return Err(SimulationError::InvalidInput(
@@ -51,7 +51,7 @@ pub fn get_fee_amount(amount: u128, fee_pips: u32) -> Result<u128, SimulationErr
 ///
 /// The product goes through `u64`: masked inputs multiply to more than `u32::MAX`.
 ///
-/// [`ProtocolFeeLibrary.sol#L51-L59`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/libraries/ProtocolFeeLibrary.sol#L51-L59)
+/// [`ProtocolFeeLibrary.sol#L51-L59`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/libraries/ProtocolFeeLibrary.sol#L51-L59)
 pub fn calculate_swap_fee(protocol_fee: u16, lp_fee: u32) -> u32 {
     let protocol_fee = u32::from(protocol_fee) & 0xfff;
     let lp_fee = lp_fee & 0xff_ffff;
@@ -65,7 +65,7 @@ pub fn calculate_swap_fee(protocol_fee: u16, lp_fee: u32) -> u32 {
 /// This leaves the pool, so `swap` subtracts it before crediting the bin. Skipping it overstates
 /// every reserve after a swap.
 ///
-/// [`PackedUint128Math.sol#L219-L247`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/math/PackedUint128Math.sol#L219-L247)
+/// [`PackedUint128Math.sol#L219-L247`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/math/PackedUint128Math.sol#L219-L247)
 pub fn protocol_fee_amount(
     fee_amount: u128,
     protocol_fee: u16,

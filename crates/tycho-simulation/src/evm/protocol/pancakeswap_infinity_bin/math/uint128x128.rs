@@ -1,4 +1,4 @@
-//! [`Uint128x128Math.sol`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/math/Uint128x128Math.sol).
+//! [`Uint128x128Math.sol`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/math/Uint128x128Math.sol).
 
 use alloy::primitives::U256;
 use tycho_common::simulation::errors::SimulationError;
@@ -16,7 +16,7 @@ use crate::evm::protocol::safe_math::safe_mul_u256;
 /// inversion always fires: positive exponents end inverted, negative ones cancel. And the `>> 128`
 /// happens per step, not once at the end.
 ///
-/// [`Uint128x128Math.sol#L87-L156`](https://github.com/pancakeswap/infinity-core/blob/d0e879334da8ea789a895d864dbe34259ea9fb65/src/pool-bin/libraries/math/Uint128x128Math.sol#L87-L156)
+/// [`Uint128x128Math.sol#L87-L156`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/math/Uint128x128Math.sol#L87-L156)
 pub fn pow(x: U256, y: i32) -> Result<U256, SimulationError> {
     if y == 0 {
         return Ok(SCALE);
