@@ -10,15 +10,16 @@ skip_balance_check: true
 # the suite off debug_storageRangeAt, which not every archive RPC serves.
 initialized_accounts:
 tests:
-  # Hookless static-fee pool, minted into in the creation transaction, so bin reserves are non-zero
-  # from the first block and simulation can quote immediately. The Mint also exercises the branch
-  # in map_bin_changes where a missing storage slot is a hard error rather than a skip.
+  # Two hookless static-fee pools, both minted into in their creation transaction, so bin reserves
+  # are non-zero from the first block and simulation can quote immediately. The Mints exercise the
+  # branch in map_bin_changes where a missing storage slot is a hard error rather than a skip.
   #
-  # No Swap in this window: the pool's first swap is roughly a million blocks out, so the
-  # active-id update path is covered by unit tests rather than here.
-  - name: test_usdc_usdt_pool
+  # The ETH/USDC pool swaps at 32980443, 289 blocks after it is created, the only swap on a pool
+  # this test tracks. It moves the active id from 8369118 to 8369114, so the tree walk between the
+  # swap's ends covers five bins and the active-id update is checked against chain state.
+  - name: test_usdc_usdt_and_eth_usdc_pools
     start_block: 32979792
-    stop_block: 32980292
+    stop_block: 32980500
     expected_components:
       - id: "0x34e19068fd32b59dc649757324d827675a736f2be33ec2bef4647bf876c0f6e7"
         tokens:
@@ -28,5 +29,15 @@ tests:
           key_lp_fee: "0x07"
           bin_step: "0x000a"
         creation_tx: "0x3839d52a9c8e8b22f6eead472c2aacd889635079b3bf55fc9461f3dda441c6a6"
+        skip_simulation: false
+        skip_execution: false
+      - id: "0x8589b03e78dc15f046d27bc2d34e867613a67696a409e07c29313a15895838a9"
+        tokens:
+          - "0x0000000000000000000000000000000000000000" # ETH
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+        static_attributes:
+          key_lp_fee: "0x00c9"
+          bin_step: "0x000a"
+        creation_tx: "0xc9bcfb1f57003e839c489d9fae3ec93d46a85924e1020a14a4fd8d7d07f7d3f4"
         skip_simulation: false
         skip_execution: false

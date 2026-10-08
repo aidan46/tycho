@@ -24,8 +24,9 @@ binaries:
     type: wasm/rust-v1
     file: ../target/wasm32-unknown-unknown/release/base_pancakeswap_infinity_bin.wasm
 
-# Module graph. Smaller than the CL package: no tick/liquidity/sqrt-price stores, but one extra
-# map that reads per-bin reserves out of BinPoolManager storage diffs.
+# Module graph. Smaller than the CL package: no tick/liquidity/sqrt-price stores, but two extra
+# maps that read BinPoolManager storage diffs, per-bin reserves and the bin tree, plus the store
+# that carries the tree to the swap path.
 # initialBlock 30544163 is the first Base block where BinPoolManager
 # 0xC697d2898e0D09264376196696c51D7aBbbAA4a9 has code (binary search on eth_getCode, 2026-09-24).
 modules:
@@ -56,6 +57,8 @@ modules:
     output:
       type: proto:pancakeswap.infinity.bin.Events
 
+  # Bin tree leaves rewritten by mints and burns, so map_bin_changes can walk the tree a swap
+  # walked instead of every id between its ends.
   - name: map_tree_changes
     kind: map
     initialBlock: 30544163
@@ -74,6 +77,7 @@ modules:
     inputs:
       - map: map_events
 
+  # Tree leaves in `get` mode, read as of a log ordinal like store_active_id.
   - name: store_bin_trees
     kind: store
     initialBlock: 30544163
@@ -82,8 +86,8 @@ modules:
     inputs:
       - map: map_tree_changes
 
-  # Needs the raw Block for storage diffs, and store_active_id in `get` mode (not deltas) so it
-  # can ask for the value as of a specific log ordinal.
+  # Needs the raw Block for storage diffs, and both stores in `get` mode (not deltas) so it can
+  # ask for the value as of a specific log ordinal.
   - name: map_bin_changes
     kind: map
     initialBlock: 30544163
