@@ -80,6 +80,13 @@ pub struct BinDelta {
     pub currency0: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes="vec", tag="8")]
     pub currency1: ::prost::alloc::vec::Vec<u8>,
+    /// Tree membership before and after this event. Only tree bins are swapped through: a burn down
+    /// to MINIMUM_SHARE removes a bin from the tree but leaves dust in reserveOfBin, so reserves
+    /// alone overstate what a swap can reach.
+    #[prost(bool, tag="9")]
+    pub was_in_tree: bool,
+    #[prost(bool, tag="10")]
+    pub in_tree: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

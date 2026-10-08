@@ -68,7 +68,14 @@ pub fn map_bin_changes(
             .get(&tx_index)
             .copied()
             .unwrap_or(0);
-        deltas.extend(event_to_deltas(event, writes, swap_bins, floor)?);
+        let mut event_deltas = event_to_deltas(event, writes, swap_bins, floor)?;
+        let pool = event.pool_id.trim_start_matches("0x");
+        for delta in &mut event_deltas {
+            delta.was_in_tree =
+                bin_in_tree(&bin_trees_store, pool, delta.bin_id, delta.ordinal - 1);
+            delta.in_tree = bin_in_tree(&bin_trees_store, pool, delta.bin_id, delta.ordinal);
+        }
+        deltas.extend(event_deltas);
         prev_log.insert(tx_index, event.log_ordinal);
     }
 
@@ -123,6 +130,16 @@ fn set_bits(word: &[u8]) -> impl Iterator<Item = u32> + '_ {
         let byte = word[31 - (bit / 8) as usize];
         byte & (1 << (bit % 8)) != 0
     })
+}
+
+/// Whether `bin_id` is in the tree as of `ordinal`, including a write at that ordinal.
+fn bin_in_tree<S: StoreGet<Vec<u8>>>(store: &S, pool_id: &str, bin_id: u32, ordinal: u64) -> bool {
+    store
+        .get_at(ordinal, format!("tree:{pool_id}:{}", bin_id >> 8))
+        .is_some_and(|word| {
+            let bit = bin_id & 0xff;
+            word[31 - (bit / 8) as usize] & (1 << (bit % 8)) != 0
+        })
 }
 
 /// Bins one event touched. `bin_id` comes from the event, the packed reserves from the storage
@@ -190,6 +207,9 @@ fn event_to_deltas(
                 new_packed: change.new_value.clone(),
                 ordinal: event.log_ordinal,
                 transaction: event.transaction.clone(),
+                // Tree membership is read by the caller, which has the store.
+                was_in_tree: false,
+                in_tree: false,
             }),
             // Event named the bin, so an absent slot means the layout assumption is broken.
             None if missing_is_fatal => {
@@ -476,6 +496,25 @@ mod tests {
 
         assert_eq!(tree_bins_between(&store, POOL_ID, low, high, 9), vec![low, mid, high]);
         assert_eq!(tree_bins_between(&store, POOL_ID, low + 1, high - 1, 9), vec![mid]);
+    }
+
+    /// The store writes a mint's or burn's word at that log's own ordinal, so the after-side read
+    /// must include it and the before-side read must not.
+    #[test]
+    fn bin_in_tree_includes_a_write_at_the_ordinal() {
+        let store = FakeRawStore(vec![(9, format!("tree:{POOL_ID}:0"), tree_word(5))]);
+
+        assert!(bin_in_tree(&store, POOL_ID, 5, 9));
+        assert!(!bin_in_tree(&store, POOL_ID, 5, 8));
+    }
+
+    /// A segment word that exists says nothing about bins whose bit is clear.
+    #[test]
+    fn bin_in_tree_tests_the_bins_own_bit() {
+        let store = FakeRawStore(vec![(1, format!("tree:{POOL_ID}:0"), tree_word(5))]);
+
+        assert!(!bin_in_tree(&store, POOL_ID, 6, 9));
+        assert!(!bin_in_tree(&store, POOL_ID, 256 + 5, 9), "segment 1 was never written");
     }
 
     /// A mint at the swap's own ordinal is a later log; one just before it must be visible.

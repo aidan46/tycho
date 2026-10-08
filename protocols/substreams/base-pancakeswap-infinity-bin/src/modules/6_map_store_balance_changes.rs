@@ -113,6 +113,8 @@ mod tests {
                 new_packed: new,
                 ordinal: 3,
                 transaction: None,
+                was_in_tree: true,
+                in_tree: true,
             }],
         })
     }
@@ -158,6 +160,8 @@ mod tests {
             new_packed: word(x, y),
             ordinal: 3,
             transaction: None,
+            was_in_tree: false,
+            in_tree: false,
         };
 
         let out =

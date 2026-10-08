@@ -58,6 +58,11 @@ message BinDelta {
   // the pool's tokens only exist on the event it came from.
   bytes currency0 = 7;
   bytes currency1 = 8;
+  // Tree membership before and after this event. Only tree bins are swapped through: a burn down
+  // to MINIMUM_SHARE removes a bin from the tree but leaves dust in reserveOfBin, so reserves
+  // alone overstate what a swap can reach.
+  bool was_in_tree = 9;
+  bool in_tree = 10;
 }
 
 message BinDeltas {

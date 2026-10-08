@@ -2,7 +2,7 @@ use crate::{
     parameters,
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
-        BinDeltas, Events,
+        BinDelta, BinDeltas, Events,
     },
 };
 use itertools::Itertools;
@@ -117,27 +117,27 @@ pub fn collect_transaction_changes(
             });
         });
 
-    // One `bins/{id}` per delta. No store lookup: the delta has both sides.
-    bin_deltas
-        .deltas
-        .into_iter()
-        .for_each(|delta| {
-            let attribute = Attribute {
-                name: format!("bins/{}", delta.bin_id),
-                // Raw packed word, so indexing and simulation cannot drift.
-                value: delta.new_packed.clone(),
-                change: bin_change_type(&delta.old_packed, &delta.new_packed).into(),
-            };
-            let tx = delta.transaction.unwrap();
-            let builder = transaction_changes
-                .entry(tx.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(&tx.into()));
+    // One `bins/{id}` per visible delta. No store lookup: the delta has both sides.
+    for delta in bin_deltas.deltas {
+        let Some(change) = bin_change_type(&delta) else {
+            continue;
+        };
+        let attribute = Attribute {
+            name: format!("bins/{}", delta.bin_id),
+            // Raw packed word, so indexing and simulation cannot drift.
+            value: delta.new_packed.clone(),
+            change: change.into(),
+        };
+        let tx = delta.transaction.unwrap();
+        let builder = transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(&tx.into()));
 
-            builder.add_entity_change(&EntityChanges {
-                component_id: delta.pool_id.to_hex(),
-                attributes: vec![attribute],
-            });
+        builder.add_entity_change(&EntityChanges {
+            component_id: delta.pool_id.to_hex(),
+            attributes: vec![attribute],
         });
+    }
 
     transaction_changes
         .drain()
@@ -146,20 +146,19 @@ pub fn collect_transaction_changes(
         .collect()
 }
 
-/// Change type for a `bins/` attribute.
+/// Change type for a `bins/` attribute, `None` when the bin is invisible on both sides.
 ///
-/// Empty counts as zero: a bin created in this block can report an empty old side rather than 32
-/// zero bytes. Deletion matters, or emptied bins stay in the snapshot forever and simulation walks
-/// dead bins.
-fn bin_change_type(old: &[u8], new: &[u8]) -> ChangeType {
+/// Visible means in the tree with reserves. A swap can drain a tree bin and a burn can drop a
+/// bin that keeps dust; both must leave the snapshot, so visibility picks the change.
+fn bin_change_type(delta: &BinDelta) -> Option<ChangeType> {
     let is_zero = |value: &[u8]| value.iter().all(|byte| *byte == 0);
-
-    if is_zero(old) {
-        ChangeType::Creation
-    } else if is_zero(new) {
-        ChangeType::Deletion
-    } else {
-        ChangeType::Update
+    let before = delta.was_in_tree && !is_zero(&delta.old_packed);
+    let after = delta.in_tree && !is_zero(&delta.new_packed);
+    match (before, after) {
+        (false, true) => Some(ChangeType::Creation),
+        (true, true) => Some(ChangeType::Update),
+        (true, false) => Some(ChangeType::Deletion),
+        (false, false) => None,
     }
 }
 
@@ -207,21 +206,51 @@ mod tests {
         vec![value; 32]
     }
 
-    /// An empty slice is how a bin first written this block reports its old side. Creation wins
-    /// when both sides are zero, which keeps a never-funded bin out of the deleted set, and a
-    /// zeroed new side must be a deletion or the bin stays in the snapshot forever.
+    fn delta(was_in_tree: bool, old: Vec<u8>, in_tree: bool, new: Vec<u8>) -> BinDelta {
+        BinDelta {
+            pool_id: vec![0xab; 32],
+            currency0: vec![],
+            currency1: vec![],
+            bin_id: 7,
+            old_packed: old,
+            new_packed: new,
+            ordinal: 1,
+            transaction: None,
+            was_in_tree,
+            in_tree,
+        }
+    }
+
+    /// An empty slice is how a bin first written this block reports its old side.
     #[rstest]
-    #[case::funded_from_zero(word(0), word(1), ChangeType::Creation)]
-    #[case::funded_from_empty(vec![], word(1), ChangeType::Creation)]
-    #[case::emptied_to_zero(word(1), word(0), ChangeType::Deletion)]
-    #[case::emptied_to_empty(word(1), vec![], ChangeType::Deletion)]
-    #[case::moved(word(1), word(2), ChangeType::Update)]
-    #[case::never_funded(word(0), word(0), ChangeType::Creation)]
+    #[case::funded_from_zero(true, word(0), true, word(1), Some(ChangeType::Creation))]
+    #[case::funded_from_empty(true, vec![], true, word(1), Some(ChangeType::Creation))]
+    #[case::emptied_to_zero(true, word(1), true, word(0), Some(ChangeType::Deletion))]
+    #[case::emptied_to_empty(true, word(1), true, vec![], Some(ChangeType::Deletion))]
+    #[case::moved(true, word(1), true, word(2), Some(ChangeType::Update))]
+    #[case::never_funded(true, word(0), true, word(0), None)]
+    #[case::burnt_to_dust_leaves_the_tree(
+        true,
+        word(10),
+        false,
+        word(1),
+        Some(ChangeType::Deletion)
+    )]
+    #[case::dust_bin_minted_back_into_the_tree(
+        false,
+        word(1),
+        true,
+        word(20),
+        Some(ChangeType::Creation)
+    )]
+    #[case::swap_through_a_dust_active_bin(false, word(1), false, word(2), None)]
     fn test_bin_change_type(
+        #[case] was_in_tree: bool,
         #[case] old: Vec<u8>,
+        #[case] in_tree: bool,
         #[case] new: Vec<u8>,
-        #[case] expected: ChangeType,
+        #[case] expected: Option<ChangeType>,
     ) {
-        assert_eq!(bin_change_type(&old, &new), expected);
+        assert_eq!(bin_change_type(&delta(was_in_tree, old, in_tree, new)), expected);
     }
 }

@@ -24,11 +24,17 @@ Included: pools with a static LP fee and no swap hook.
 Excluded: swap-hook pools, dynamic-fee pools. Unlike the CL package, `Donate` IS indexed, because
 in Bin it moves real reserves rather than only fee growth.
 
+`bins/{id}` is emitted only while the bin is in the pool's tree, which is what the swap loop can
+reach. A burn down to `MINIMUM_SHARE` drops a bin from the tree with dust still in `reserveOfBin`,
+so the attribute is deleted even though reserves are not zero. One gap: a dust bin that is still
+the active bin is traded through on chain but hidden here.
+
 ## Build
 
 ```bash
 cd protocols/substreams
-substreams protogen base-pancakeswap-infinity-bin/base-pancakeswap-infinity-bin.yaml --exclude-paths="sf,google,tycho"
+# From the package dir, so protogen uses its buf.gen.yaml instead of writing one here.
+(cd base-pancakeswap-infinity-bin && substreams protogen base-pancakeswap-infinity-bin.yaml --exclude-paths="sf,google,tycho")
 cargo build --package base-pancakeswap-infinity-bin --target wasm32-unknown-unknown --release
 cargo test --package base-pancakeswap-infinity-bin
 cd base-pancakeswap-infinity-bin
