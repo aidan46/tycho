@@ -28,6 +28,7 @@ pub struct NativeAllPairsState {
     /// Every direction a book quotes, sorted, with the index of its state in `states`. A book
     /// quoting the pair as given beats one quoting it the other way round.
     directions: Arc<Vec<((Bytes, Bytes), usize)>>,
+    /// Whether a swap on this state already took Native's quote.
     used: bool,
 }
 
@@ -81,7 +82,6 @@ impl NativeAllPairsState {
         Ok(Self { states: Arc::new(states), directions: Arc::new(directions), used: false })
     }
 
-    /// Whether a swap on this state already took Native's quote.
     /// The per-pair state that trades `token_in` for `token_out`.
     fn pair_state(
         &self,
