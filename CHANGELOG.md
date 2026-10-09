@@ -1,3 +1,17 @@
+## [0.452.0](https://github.com/propeller-heads/tycho/compare/0.451.0...0.452.0) (2026-10-09)
+
+
+### Features
+
+* **simulation:** RFQ venues as one component for all pairs with quote reuse rules ([#1501](https://github.com/propeller-heads/tycho/issues/1501)) ([339273e](https://github.com/propeller-heads/tycho/commit/339273edad00610bebbebb9b532bbf4d04563074))
+* **simulation:** RFQ venues as one component per chain, opt-in ([cdac0ec](https://github.com/propeller-heads/tycho/commit/cdac0ecc434c4384ddaf22fb61b5ffe2300799be))
+
+
+### Bug Fixes
+
+* **simulation:** name the quote rule in all-pairs used-quote errors ([cbbfd59](https://github.com/propeller-heads/tycho/commit/cbbfd5972556e8f2192f931ab5a8c6365fc7dcb1))
+* **simulation:** return instead of panic in all-pairs fee and delta_transition ([fbea4bf](https://github.com/propeller-heads/tycho/commit/fbea4bfd4c7b3f38d2b24fe125dbb07f4c7048a3))
+
 ## [0.451.0](https://github.com/propeller-heads/tycho/compare/0.450.0...0.451.0) (2026-10-09)
 
 
