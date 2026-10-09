@@ -1,3 +1,11 @@
+## [0.451.0](https://github.com/propeller-heads/tycho/compare/0.450.0...0.451.0) (2026-10-09)
+
+
+### Features
+
+* **simulation:** keep the two ETH/stETH curve pools in curve_filter ([ca73927](https://github.com/propeller-heads/tycho/commit/ca739275ded79ce11a7ce8c8a167b3d1c68c5a89))
+* **simulation:** keep the two ETH/stETH curve pools in curve_filter ([#1573](https://github.com/propeller-heads/tycho/issues/1573)) ([b90552e](https://github.com/propeller-heads/tycho/commit/b90552e92937d26123fde3f7cba05137505921e3))
+
 ## [0.450.0](https://github.com/propeller-heads/tycho/compare/0.449.0...0.450.0) (2026-10-09)
 
 
