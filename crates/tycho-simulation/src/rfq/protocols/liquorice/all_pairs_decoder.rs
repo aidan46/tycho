@@ -55,8 +55,14 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceAllPairs
 mod tests {
     use std::env;
 
+    use num_bigint::BigUint;
+    use tycho_common::simulation::{errors::SimulationError, protocol_sim::ProtocolSim};
+
     use super::*;
-    use crate::rfq::protocols::test_utils::{all_pairs_snapshot, decode, usdc, wbtc, weth};
+    use crate::rfq::{
+        models::QuoteRule,
+        protocols::test_utils::{all_pairs_snapshot, decode, usdc, wbtc, weth},
+    };
 
     #[tokio::test]
     async fn test_decodes_price_levels() {
@@ -93,5 +99,54 @@ mod tests {
         assert_eq!(wbtc_price_levels[0].market_maker, "mm_b");
         assert_eq!(wbtc_price_levels[1].levels[0].quantity, 1.5);
         assert_eq!(wbtc_price_levels[1].levels[0].price, 65000.0);
+    }
+
+    /// `mm_b` fills the WBTC swap, and the WETH pair only `test_market_maker` quotes is then
+    /// refused — which only `once_per_venue` does.
+    #[tokio::test]
+    async fn test_decodes_once_per_venue_attribute() {
+        env::set_var("LIQUORICE_USER", "test_solver");
+        env::set_var("LIQUORICE_KEY", "test_key");
+        let price_levels = serde_json::json!([
+            {
+                "mm": "mm_b",
+                "base_token": wbtc().address, "quote_token": usdc().address,
+                "levels": [{ "q": "0.5", "p": "65100.0" }]
+            },
+            {
+                "mm": "test_market_maker",
+                "base_token": weth().address, "quote_token": usdc().address,
+                "levels": [{ "q": "10", "p": "3000.0" }]
+            }
+        ]);
+        let (mut snapshot, tokens) =
+            all_pairs_snapshot("rfq:liquorice", &[wbtc(), usdc(), weth()], &price_levels);
+        snapshot
+            .component
+            .static_attributes
+            .insert(
+                QuoteRule::ATTRIBUTE.to_string(),
+                QuoteRule::OncePerVenue
+                    .as_str()
+                    .as_bytes()
+                    .into(),
+            );
+
+        let state = decode::<LiquoriceAllPairsState>(snapshot, &tokens)
+            .await
+            .unwrap();
+        let after_swap = state
+            .get_amount_out(BigUint::from(50_000_000u64), &wbtc(), &usdc())
+            .unwrap()
+            .new_state;
+
+        let result = after_swap.get_amount_out(
+            BigUint::from(1_000_000_000_000_000_000u64),
+            &weth(),
+            &usdc(),
+        );
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(message)) if message.contains("already quoted in this route"))
+        );
     }
 }

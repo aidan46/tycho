@@ -210,11 +210,11 @@ mod tests {
             .as_any()
             .downcast_ref::<HashflowAllPairsState>()
             .unwrap();
-        assert!(
-            new_state.price_levels ==
-                state
-                    .price_levels
-                    .with_used("test_mm_2")
+        assert_eq!(
+            new_state.price_levels,
+            state
+                .price_levels
+                .with_used("test_mm_2")
         );
     }
 

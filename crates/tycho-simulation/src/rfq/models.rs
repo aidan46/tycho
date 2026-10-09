@@ -149,4 +149,28 @@ mod tests {
         assert_eq!(fill_levels(&levels, 2.0), (5999.0, 0.0));
         assert_eq!(fill_levels(&levels, 5.0), (8998.0, 2.0));
     }
+
+    #[test]
+    fn quote_rule_attribute_round_trip() {
+        for rule in [QuoteRule::OncePerMaker, QuoteRule::OncePerVenue] {
+            let attributes = HashMap::from([(
+                QuoteRule::ATTRIBUTE.to_string(),
+                rule.as_str().as_bytes().into(),
+            )]);
+            assert_eq!(QuoteRule::from_attributes(&attributes), Ok(Some(rule)));
+        }
+    }
+
+    #[test]
+    fn quote_rule_attribute_absent() {
+        assert_eq!(QuoteRule::from_attributes(&HashMap::new()), Ok(None));
+    }
+
+    #[test]
+    fn quote_rule_attribute_unknown_value() {
+        let attributes =
+            HashMap::from([(QuoteRule::ATTRIBUTE.to_string(), b"twice_per_venue".into())]);
+        let result = QuoteRule::from_attributes(&attributes);
+        assert!(matches!(result, Err(message) if message.contains("twice_per_venue")));
+    }
 }

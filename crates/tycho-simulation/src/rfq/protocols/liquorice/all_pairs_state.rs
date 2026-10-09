@@ -211,7 +211,7 @@ mod tests {
             .as_any()
             .downcast_ref::<LiquoriceAllPairsState>()
             .unwrap();
-        assert!(new_state.price_levels == state.price_levels.with_used("test_mm"));
+        assert_eq!(new_state.price_levels, state.price_levels.with_used("test_mm"));
     }
 
     #[tokio::test]

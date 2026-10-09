@@ -201,6 +201,15 @@ mod tests {
     }
 
     #[test]
+    fn swap_directions_length_not_a_multiple_of_40() {
+        let mut attribute =
+            encode_swap_directions(&BTreeSet::from([(weth().address, usdc().address)])).to_vec();
+        attribute.push(0);
+        let result = decode_swap_directions(&attribute);
+        assert!(matches!(result, Err(message) if message.contains("not a multiple of 40")));
+    }
+
+    #[test]
     fn component_tokens_are_the_directions_tokens() {
         let directions = BTreeSet::from([(weth().address, usdc().address)]);
         let component = all_pairs_component(

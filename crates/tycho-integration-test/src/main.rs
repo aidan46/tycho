@@ -2250,10 +2250,74 @@ fn format_error_chain(e: &miette::Error) -> String {
 mod tests {
     use clap::Parser;
     use rstest::rstest;
+    use tycho_common::models::{token::Token, Chain};
 
     use super::{
-        is_oracle_stale_revert, pamm_venue, should_fetch_block_by_number, Cli, TychoState,
+        is_oracle_stale_revert, pamm_venue, rfq_swap_directions, sample_rfq_swap_directions,
+        should_fetch_block_by_number, Bytes, Cli, TychoState, MAX_RFQ_SWAP_DIRECTIONS,
     };
+
+    /// A token whose address is `byte` repeated, so each one differs.
+    fn token(byte: u8) -> Token {
+        Token::new(
+            &Bytes::from(vec![byte; 20]),
+            &format!("T{byte}"),
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    /// The attribute the all-pairs component carries: token in, then token out, 20 bytes each.
+    fn swap_directions_attribute(directions: &[(&Token, &Token)]) -> Bytes {
+        let mut encoded = Vec::new();
+        for (token_in, token_out) in directions {
+            encoded.extend_from_slice(&token_in.address);
+            encoded.extend_from_slice(&token_out.address);
+        }
+        encoded.into()
+    }
+
+    #[test]
+    fn rfq_swap_directions_reads_the_attribute() {
+        let (a, b) = (token(1), token(2));
+        let attribute = swap_directions_attribute(&[(&a, &b), (&b, &a)]);
+
+        let directions = rfq_swap_directions(&attribute, &[a.clone(), b.clone()]).unwrap();
+
+        assert_eq!(directions, [(a.clone(), b.clone()), (b, a)]);
+    }
+
+    #[test]
+    fn rfq_swap_directions_names_a_token_the_component_lacks() {
+        let (a, b) = (token(1), token(2));
+        let attribute = swap_directions_attribute(&[(&a, &b)]);
+
+        let result = rfq_swap_directions(&attribute, &[a]);
+
+        assert!(result.is_err_and(|message| message.contains("does not carry")));
+    }
+
+    #[test]
+    fn sample_rfq_swap_directions_caps_the_count() {
+        let tokens: Vec<Token> = (0..=MAX_RFQ_SWAP_DIRECTIONS as u8)
+            .map(token)
+            .collect();
+        let directions: Vec<(Token, Token)> = tokens
+            .iter()
+            .map(|token_in| (token_in.clone(), tokens[0].clone()))
+            .collect();
+        assert!(directions.len() > MAX_RFQ_SWAP_DIRECTIONS);
+
+        let sampled = sample_rfq_swap_directions(directions.clone());
+
+        assert_eq!(sampled.len(), MAX_RFQ_SWAP_DIRECTIONS);
+        for direction in &sampled {
+            assert!(directions.contains(direction));
+        }
+    }
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
